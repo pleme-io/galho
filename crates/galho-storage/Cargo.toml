@@ -1,0 +1,29 @@
+[package]
+name = "galho-storage"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Git-style content-addressed Merkle-DAG object store for galho. Pluggable backends (memory, local-fs, S3, Postgres). Reference-counted GC. Consumes galho-types for canonical bytes + Blake3Hash; consumes tameshi via galho-types for the hash itself."
+
+[dependencies]
+async-trait       = { workspace = true }
+serde             = { workspace = true }
+serde_json        = { workspace = true }
+thiserror         = { workspace = true }
+time              = { workspace = true }
+tokio             = { workspace = true }
+tracing           = { workspace = true }
+
+# galho's typed IR + canonical bytes + Blake3Hash re-export.
+galho-types       = { workspace = true }
+
+# tameshi: re-used directly for Blake3Hash::digest in raw-bytes path.
+tameshi           = { workspace = true }
+
+[dev-dependencies]
+proptest          = { workspace = true }
+tempfile          = { workspace = true }
+tokio             = { workspace = true, features = ["test-util"] }

@@ -1,0 +1,29 @@
+[package]
+name = "galho-controller"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "engenho_controllers::Controller impl for galho — second canonical consumer of the trait outside engenho's own controllers. Per-tick: iterates known galhos, fires Automatic-sync forward morphisms when preconditions are satisfied, emits typed ReconcileReport. Shares Runtime logic with galho-cli so CLI and controller stay in lockstep."
+
+[dependencies]
+anyhow            = { workspace = true }
+async-trait       = { workspace = true }
+serde             = { workspace = true }
+serde_json        = { workspace = true }
+thiserror         = { workspace = true }
+time              = { workspace = true }
+tokio             = { workspace = true }
+tracing           = { workspace = true }
+
+galho-types       = { workspace = true }
+galho-storage     = { workspace = true }
+galho-cli         = { workspace = true }
+
+# The trait we consume — second canonical consumer outside engenho's own controllers.
+engenho-controllers = { workspace = true }
+
+[dev-dependencies]
+tokio             = { workspace = true, features = ["macros", "rt-multi-thread"] }

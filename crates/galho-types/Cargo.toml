@@ -1,0 +1,35 @@
+[package]
+name = "galho-types"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Canonical Resource Graph IR + content-addressed Merkle-DAG state + three-way merge algebra for galho (branch-aware typed IaC state). IaC-system-agnostic algebra; per-IaCSystem adapters consume this crate to plug into the algebra. Consumes tameshi::Canonicalizer for canonical bytes → BLAKE3 hashing."
+
+[features]
+# Public test-helper builders + proptest strategies. Off by default for prod
+# (zero proptest dep). Downstream test crates + adapter integration tests opt in
+# via `galho-types = { ..., features = ["testing"] }`.
+testing = ["dep:proptest"]
+
+[dependencies]
+serde             = { workspace = true }
+serde_json        = { workspace = true }
+thiserror         = { workspace = true }
+time              = { workspace = true }
+tracing           = { workspace = true }
+
+# Canonical second-consumer of tameshi's Canonicalizer trait.
+# Advances tameshi's trait from "exported by tameshi" → "canonical fleet-wide
+# abstraction" per the org Prime Directive three-site rule.
+tameshi           = { workspace = true }
+
+# Optional: only pulled in when `testing` feature is enabled.
+proptest          = { workspace = true, optional = true }
+
+[dev-dependencies]
+proptest          = { workspace = true }
+# Self-feature so the proptest suites + integration tests see `testing::*`.
+galho-types       = { path = ".", features = ["testing"] }

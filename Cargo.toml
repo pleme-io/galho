@@ -1,0 +1,61 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/galho-types",
+    "crates/galho-storage",
+    "crates/galho-cli",
+    "crates/galho-controller",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89.0"
+license = "MIT"
+authors = ["Pleme Team <team@pleme.io>"]
+repository = "https://github.com/pleme-io/galho"
+homepage = "https://github.com/pleme-io/galho"
+keywords = ["iac", "terraform", "branch", "state", "merkle-dag"]
+categories = ["development-tools", "config"]
+
+[workspace.dependencies]
+# Core deps
+anyhow            = "1.0"
+thiserror         = "2.0"
+serde             = { version = "1.0", features = ["derive"] }
+serde_json        = "1"
+serde_yaml_ng     = "0.10"
+blake3            = "1.5"
+time              = { version = "0.3", features = ["serde", "macros", "formatting", "parsing"] }
+tracing           = "0.1"
+
+# Consumed pleme-io traits — galho is the canonical second consumer of each.
+# Path deps used during in-tree development (sibling repos in ~/code/github/pleme-io).
+# Release workflow can swap to git deps before publishing to crates.io.
+# tameshi: Canonicalizer + Blake3Hash + canonical_hash helper.
+tameshi             = { path = "../tameshi" }
+# engenho-controllers: Controller trait + ReconcileReport + ControllerError + ControllerRuntime.
+engenho-controllers = { path = "../engenho/engenho-controllers" }
+
+# In-tree workspace crates (siblings).
+galho-types       = { path = "crates/galho-types" }
+galho-storage     = { path = "crates/galho-storage" }
+galho-cli         = { path = "crates/galho-cli" }
+
+# CLI deps.
+clap              = { version = "4.5", features = ["derive"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Async runtime + helpers (consumed via storage backends + future controller).
+async-trait       = "0.1"
+tokio             = { version = "1", features = ["fs", "io-util", "macros", "rt", "rt-multi-thread", "sync"] }
+
+# Dev / test
+proptest          = "1.4"
+tempfile          = "3"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "z"
+strip = true

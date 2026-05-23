@@ -1,0 +1,462 @@
+//! galho-cli — library surface. The `main.rs` binary thin-wraps this library so
+//! integration tests can drive the same logic without spawning a process.
+//!
+//! The library owns:
+//!
+//! - [`Runtime`] — handle wrapping an `ObjectStore` + a `KnowledgeBase` + an in-memory
+//!   `MorphismContext` per galho name. Local-only for v0.1; controller-attached mode
+//!   at M4.
+//! - [`fire_morphism`](Runtime::fire_morphism) — fires a typed morphism, advances the
+//!   galho's phase, updates context flags (e.g. `has_plan` after a `Plan` morphism).
+//! - Knowledge queries — `Phases / Transitions / From / Sync / Reachable`.
+
+#![forbid(unsafe_code)]
+#![warn(clippy::all, clippy::pedantic)]
+#![allow(clippy::missing_errors_doc, clippy::module_name_repetitions)]
+
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use anyhow::{anyhow, Context, Result};
+use galho_storage::backends::{LocalFsBackend, MemoryBackend};
+use galho_types::{
+    morphism_for, transition_table, KnowledgeBase, LogOutcomeEmitter, MorphismContext,
+    MorphismId, OutcomeEmitter, OutcomeEvent, OutcomeEventType, Phase, PhaseClass, StackLock,
+    StackRoot, SyncConfig, SyncKind,
+};
+use serde::Serialize;
+use time::Duration;
+use tokio::sync::RwLock;
+
+/// One-line phase + sync summary returned by `Runtime::status`.
+#[derive(Debug, Clone)]
+pub struct StatusReport {
+    pub name: String,
+    pub phase: PhaseDisplay,
+    pub forward: Vec<MorphismId>,
+    pub backward: Vec<MorphismId>,
+    pub sync_summary: Option<String>,
+    pub stack_lock_root: Option<String>,
+    pub stack_lock_holders: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct PhaseDisplay(pub Phase);
+
+impl std::fmt::Display for PhaseDisplay {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0.as_str())
+    }
+}
+
+impl PhaseDisplay {
+    #[must_use]
+    pub fn class_str(&self) -> &'static str {
+        match self.0.class() {
+            PhaseClass::Forward => "forward",
+            PhaseClass::Backward => "backward",
+            PhaseClass::Terminal => "terminal",
+            PhaseClass::Failure => "failure",
+        }
+    }
+}
+
+/// The CLI runtime. Wraps an object store + in-memory galho context map + an outcome
+/// emitter that observes every state transition. The emitter is pluggable so consumers
+/// pick the right destination — `LogOutcomeEmitter` for production CLI use,
+/// `MemoryOutcomeEmitter` for tests, future `TameshiOutcomeEmitter` for fleet attestation.
+pub struct Runtime {
+    backend: RuntimeBackend,
+    kb: KnowledgeBase,
+    contexts: RwLock<BTreeMap<String, MorphismContext>>,
+    locks: RwLock<BTreeMap<String, StackLock>>,
+    emitter: Arc<dyn OutcomeEmitter>,
+}
+
+#[derive(Debug)]
+pub enum RuntimeBackend {
+    Memory(Arc<MemoryBackend>),
+    LocalFs(Arc<LocalFsBackend>),
+}
+
+impl Runtime {
+    /// In-memory runtime with `LogOutcomeEmitter`. Fastest path for production use.
+    #[must_use]
+    pub fn with_memory() -> Self {
+        Self::new(
+            RuntimeBackend::Memory(Arc::new(MemoryBackend::new())),
+            Arc::new(LogOutcomeEmitter),
+        )
+    }
+
+    /// Local-fs runtime with `LogOutcomeEmitter`.
+    pub async fn with_local_fs(root: PathBuf) -> Result<Self> {
+        Ok(Self::new(
+            RuntimeBackend::LocalFs(Arc::new(LocalFsBackend::new(root))),
+            Arc::new(LogOutcomeEmitter),
+        ))
+    }
+
+    /// Construct with explicit emitter — for tests using `MemoryOutcomeEmitter` or for
+    /// future controller deployments using `TameshiOutcomeEmitter`.
+    #[must_use]
+    pub fn with_emitter(backend: RuntimeBackend, emitter: Arc<dyn OutcomeEmitter>) -> Self {
+        Self::new(backend, emitter)
+    }
+
+    fn new(backend: RuntimeBackend, emitter: Arc<dyn OutcomeEmitter>) -> Self {
+        Self {
+            backend,
+            kb: KnowledgeBase::default(),
+            contexts: RwLock::new(BTreeMap::new()),
+            locks: RwLock::new(BTreeMap::new()),
+            emitter,
+        }
+    }
+
+    /// Access the emitter — primarily for tests that need to inspect what was emitted.
+    #[must_use]
+    pub fn emitter(&self) -> &Arc<dyn OutcomeEmitter> {
+        &self.emitter
+    }
+
+    /// Internal: emit an event, swallowing errors per the emitter contract (audit
+    /// failures never block business logic).
+    fn observe(&self, event: OutcomeEvent) {
+        if let Err(e) = self.emitter.emit(&event) {
+            tracing::warn!("outcome emit failed: {e}");
+        }
+    }
+
+    /// Materialize a fresh `MorphismContext` for a new galho. The galho enters in `Declared`.
+    pub async fn new_galho(&self, name: &str) -> Result<()> {
+        let mut ctxs = self.contexts.write().await;
+        if ctxs.contains_key(name) {
+            return Err(anyhow!("galho '{name}' already exists"));
+        }
+        ctxs.insert(name.to_string(), MorphismContext::declared(name));
+        drop(ctxs);
+        self.observe(
+            OutcomeEvent::new(OutcomeEventType::GalhoCreated, name)
+                .with_phase_transition(Phase::Declared, Phase::Declared),
+        );
+        Ok(())
+    }
+
+    /// Fire a typed morphism. Returns the new phase or the typed precondition failure.
+    pub async fn fire_morphism(
+        &self,
+        name: &str,
+        morphism: MorphismId,
+        extra: Option<String>,
+    ) -> Result<Phase> {
+        let _ = morphism_for(morphism).context("unknown morphism id")?;
+
+        // Pre-action side effects + flag flips (so preconditions see fresh state).
+        if let MorphismId::ApplyToPreview = morphism {
+            let stack_root = extra
+                .clone()
+                .context("--stack-root required for `apply` (carve stack root SHA)")?;
+            self.join_or_acquire_lock(name, &stack_root).await?;
+            // Reflect lock acquisition into the context BEFORE precondition check.
+            let mut ctxs = self.contexts.write().await;
+            if let Some(ctx) = ctxs.get_mut(name) {
+                ctx.stack_lock_held = true;
+            }
+        }
+        // RecordApproval: simulate approver quorum landing on this fire (v0.1 mock;
+        // M4 wires real Sync receipts).
+        if let MorphismId::RecordApproval = morphism {
+            let mut ctxs = self.contexts.write().await;
+            if let Some(ctx) = ctxs.get_mut(name) {
+                ctx.has_approval_quorum = true;
+            }
+        }
+        // Promote: simulate the GitHub merge event having landed.
+        if let MorphismId::Promote = morphism {
+            let mut ctxs = self.contexts.write().await;
+            if let Some(ctx) = ctxs.get_mut(name) {
+                ctx.has_merge_event = true;
+            }
+        }
+        // Verify: simulate the verify receipt produced by smoke-tests.
+        if let MorphismId::Verify = morphism {
+            let mut ctxs = self.contexts.write().await;
+            if let Some(ctx) = ctxs.get_mut(name) {
+                ctx.has_verify_receipt = true;
+            }
+        }
+        // SealDone: simulate Jira ticket resolvable (M2 wires real Jira sync).
+        if let MorphismId::SealDone = morphism {
+            let mut ctxs = self.contexts.write().await;
+            if let Some(ctx) = ctxs.get_mut(name) {
+                ctx.jira_ticket_resolvable = true;
+            }
+        }
+
+        let mut ctxs = self.contexts.write().await;
+        let ctx = ctxs
+            .get_mut(name)
+            .ok_or_else(|| anyhow!("galho '{name}' not found; run `galho new` first"))?;
+
+        let next_phase = self.kb.apply_morphism(morphism, ctx).map_err(|missing| {
+            anyhow!(
+                "preconditions not satisfied for {}: {}",
+                morphism,
+                missing
+                    .iter()
+                    .map(|m| format!("{m:?}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })?;
+
+        let from_phase = ctx.current_phase;
+        ctx.current_phase = next_phase;
+        Self::update_flags_post_morphism(ctx, morphism, next_phase, extra);
+        drop(ctxs);
+
+        // Emit the typed outcome event.
+        let sync_kind = self.kb.sync_for(next_phase).map(|s| s.kind.clone());
+        let mut event = OutcomeEvent::new(OutcomeEventType::MorphismFired, name)
+            .with_phase_transition(from_phase, next_phase)
+            .with_morphism(morphism);
+        if let Some(k) = sync_kind {
+            event = event.with_sync(k);
+        }
+        // Terminal phases get an additional GalhoDestroyed event.
+        let was_destroyed = next_phase == Phase::Destroyed;
+        self.observe(event);
+        if was_destroyed {
+            self.observe(
+                OutcomeEvent::new(OutcomeEventType::GalhoDestroyed, name)
+                    .with_phase_transition(from_phase, Phase::Destroyed)
+                    .with_morphism(morphism),
+            );
+        }
+
+        Ok(next_phase)
+    }
+
+    fn update_flags_post_morphism(
+        ctx: &mut MorphismContext,
+        morphism: MorphismId,
+        next_phase: Phase,
+        _extra: Option<String>,
+    ) {
+        match morphism {
+            MorphismId::Plan => ctx.has_plan = true,
+            MorphismId::ApplyToPreview => {
+                ctx.has_apply_receipt = true;
+                ctx.stack_lock_held = true;
+            }
+            MorphismId::RecordApproval => ctx.has_approval_quorum = true,
+            MorphismId::Promote => ctx.has_merge_event = true,
+            MorphismId::Verify => ctx.has_verify_receipt = true,
+            MorphismId::SealDone => ctx.jira_ticket_resolvable = true,
+            // RevertApply is a 2-step morphism: AppliedPendingReview/ApprovedAwaitingMerge
+            // → RollingBack → RolledBack. We retain the apply receipt during RollingBack
+            // (the reverse traversal depends on it); clear ONLY when we land in RolledBack.
+            MorphismId::RevertApply => {
+                if next_phase == Phase::RolledBack {
+                    ctx.has_apply_receipt = false;
+                    ctx.has_approval_quorum = false;
+                    ctx.stack_lock_held = false;
+                }
+            }
+            MorphismId::Abandon | MorphismId::Recover => {
+                ctx.has_plan = false;
+                ctx.has_apply_receipt = false;
+                ctx.has_approval_quorum = false;
+                ctx.has_merge_event = false;
+                ctx.has_verify_receipt = false;
+                ctx.jira_ticket_resolvable = false;
+                ctx.stack_lock_held = false;
+            }
+            _ => {}
+        }
+    }
+
+    async fn join_or_acquire_lock(&self, name: &str, stack_root: &str) -> Result<()> {
+        let mut locks = self.locks.write().await;
+        let event_type = match locks.get_mut(stack_root) {
+            Some(lock) => {
+                lock.join(name);
+                OutcomeEventType::StackLockJoined
+            }
+            None => {
+                let lock = StackLock::acquire(
+                    StackRoot::new(stack_root),
+                    name,
+                    Duration::days(7),
+                );
+                locks.insert(stack_root.to_string(), lock);
+                OutcomeEventType::StackLockAcquired
+            }
+        };
+        drop(locks);
+        self.observe(
+            OutcomeEvent::new(event_type, name)
+                .with_stack_root(StackRoot::new(stack_root)),
+        );
+        Ok(())
+    }
+
+    /// Build a status report — current phase + available morphisms + sync config + stack lock.
+    pub async fn status(&self, name: &str) -> Result<StatusReport> {
+        let ctxs = self.contexts.read().await;
+        let ctx = ctxs
+            .get(name)
+            .ok_or_else(|| anyhow!("galho '{name}' not found"))?;
+
+        let phase = ctx.current_phase;
+        let forward = self.kb.forward_morphisms_from(phase);
+        let backward = self.kb.backward_morphisms_from(phase);
+        let sync_summary = self.kb.sync_for(phase).map(summarize_sync);
+
+        let locks = self.locks.read().await;
+        let (lock_root, lock_holders) = locks
+            .iter()
+            .find(|(_, l)| l.holds(name))
+            .map(|(root, l)| (Some(root.clone()), l.holder_count()))
+            .unwrap_or((None, 0));
+
+        Ok(StatusReport {
+            name: name.to_string(),
+            phase: PhaseDisplay(phase),
+            forward,
+            backward,
+            sync_summary,
+            stack_lock_root: lock_root,
+            stack_lock_holders: lock_holders,
+        })
+    }
+
+    /// Direct access to the backend (rare; used for advanced ops + tests).
+    #[must_use]
+    pub fn backend(&self) -> &RuntimeBackend {
+        &self.backend
+    }
+
+    /// List every galho name currently known to this Runtime. Sorted lexicographically
+    /// (BTreeMap iteration). Used by the controller's tick loop.
+    pub async fn list_galhos(&self) -> Vec<String> {
+        self.contexts.read().await.keys().cloned().collect()
+    }
+}
+
+fn summarize_sync(s: &SyncConfig) -> String {
+    match &s.kind {
+        SyncKind::Automatic => "automatic".into(),
+        SyncKind::OperatorApproval { roles, quorum } => {
+            format!("operator-approval {quorum}-of-{} ({})", roles.len(), roles.join(","))
+        }
+        SyncKind::ExternalSignal { source } => format!("external-signal {source:?}"),
+        SyncKind::TimeBased { soak } => format!("time-based soak={}s", soak.whole_seconds()),
+        SyncKind::AttestationGated { regime, .. } => format!("attestation-gated {regime:?}"),
+    }
+}
+
+// ----- Knowledge queries (CLI-callable; no Runtime needed) -----
+
+#[derive(Debug, Clone)]
+pub enum KnowledgeQuery {
+    Phases,
+    Transitions,
+    From(String),
+    Sync(String),
+    Reachable { start: String, target: String },
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum OutputFormat {
+    Text,
+    Json,
+}
+
+pub fn run_knowledge_query(q: KnowledgeQuery, fmt: OutputFormat) -> Result<()> {
+    let kb = KnowledgeBase::default();
+    match q {
+        KnowledgeQuery::Phases => {
+            let phases: Vec<&'static str> = Phase::all().iter().map(|p| p.as_str()).collect();
+            emit(fmt, &phases)?;
+        }
+        KnowledgeQuery::Transitions => {
+            #[derive(Serialize)]
+            struct Row {
+                from: String,
+                to: String,
+                morphism: String,
+            }
+            let rows: Vec<Row> = transition_table()
+                .iter()
+                .map(|t| Row {
+                    from: t.from.as_str().into(),
+                    to: t.to.as_str().into(),
+                    morphism: t.morphism.as_str().into(),
+                })
+                .collect();
+            emit(fmt, &rows)?;
+        }
+        KnowledgeQuery::From(phase) => {
+            let p = parse_phase(&phase)?;
+            let forward = kb.forward_morphisms_from(p);
+            let backward = kb.backward_morphisms_from(p);
+            #[derive(Serialize)]
+            struct Available {
+                phase: String,
+                forward: Vec<String>,
+                backward: Vec<String>,
+            }
+            emit(
+                fmt,
+                &Available {
+                    phase: p.as_str().into(),
+                    forward: forward.iter().map(|m| m.as_str().into()).collect(),
+                    backward: backward.iter().map(|m| m.as_str().into()).collect(),
+                },
+            )?;
+        }
+        KnowledgeQuery::Sync(phase) => {
+            let p = parse_phase(&phase)?;
+            let s = kb.sync_for(p).context("phase has no sync config")?;
+            emit(fmt, s)?;
+        }
+        KnowledgeQuery::Reachable { start, target } => {
+            let s = parse_phase(&start)?;
+            let t = parse_phase(&target)?;
+            #[derive(Serialize)]
+            struct Reach {
+                start: String,
+                target: String,
+                reachable: bool,
+            }
+            emit(
+                fmt,
+                &Reach {
+                    start: s.as_str().into(),
+                    target: t.as_str().into(),
+                    reachable: kb.is_reachable(s, t),
+                },
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn parse_phase(s: &str) -> Result<Phase> {
+    Phase::all()
+        .iter()
+        .copied()
+        .find(|p| p.as_str() == s)
+        .ok_or_else(|| anyhow!("unknown phase: '{s}'"))
+}
+
+fn emit<T: Serialize>(fmt: OutputFormat, v: &T) -> Result<()> {
+    match fmt {
+        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(v)?),
+        OutputFormat::Text => println!("{}", serde_yaml_ng::to_string(v)?),
+    }
+    Ok(())
+}

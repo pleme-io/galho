@@ -1,0 +1,34 @@
+[package]
+name = "galho-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Operator CLI for galho — branch-aware typed IaC state. Each subcommand fires one typed PhaseMorphism; the KnowledgeBase mediates phase transitions; MemoryBackend / LocalFsBackend persists the DAG. Local-only mode for offline workflows; controller-attached mode for fleet use."
+
+[[bin]]
+name = "galho"
+path = "src/main.rs"
+
+[dependencies]
+anyhow            = { workspace = true }
+clap              = { workspace = true }
+serde             = { workspace = true }
+serde_json        = { workspace = true }
+serde_yaml_ng     = { workspace = true }
+thiserror         = { workspace = true }
+time              = { workspace = true }
+tokio             = { workspace = true }
+tracing           = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+galho-types       = { workspace = true }
+galho-storage     = { workspace = true }
+
+[dev-dependencies]
+tempfile          = { workspace = true }
+proptest          = { workspace = true }
+galho-storage     = { workspace = true }
+galho-types       = { workspace = true, features = ["testing"] }

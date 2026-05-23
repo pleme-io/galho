@@ -1,0 +1,6 @@
+/target/
+/result
+/result-*
+**/*.rs.bk
+*.swp
+Cargo.lock
