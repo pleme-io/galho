@@ -142,6 +142,7 @@ fn full_forward_arc_emits_exactly_n_morphism_events() {
         r.fire_morphism("feature/done", MorphismId::Plan, None).await.unwrap();
         r.fire_morphism("feature/done", MorphismId::ApplyToPreview, Some("r".into()))
             .await.unwrap();
+        r.confirm_approval("feature/done", "reviewer").await.unwrap();
         r.fire_morphism("feature/done", MorphismId::RecordApproval, Some("rev".into()))
             .await.unwrap();
         r.fire_morphism("feature/done", MorphismId::Promote, None).await.unwrap();
@@ -150,9 +151,10 @@ fn full_forward_arc_emits_exactly_n_morphism_events() {
 
         // 6 forward morphisms fired.
         assert_eq!(em.count_of(OutcomeEventType::MorphismFired), 6);
-        // Plus 1 created + 1 stack-acquired = 8 total non-destroyed events.
+        // Plus 1 created + 1 stack-acquired + 1 sync-confirmed = 9 total non-destroyed events.
         assert_eq!(em.count_of(OutcomeEventType::GalhoCreated), 1);
         assert_eq!(em.count_of(OutcomeEventType::StackLockAcquired), 1);
+        assert_eq!(em.count_of(OutcomeEventType::SyncConfirmed), 1);
         // No destroyed event (Done is terminal but not Destroyed).
         assert_eq!(em.count_of(OutcomeEventType::GalhoDestroyed), 0);
     });

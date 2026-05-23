@@ -29,6 +29,37 @@ use serde::Serialize;
 use time::Duration;
 use tokio::sync::RwLock;
 
+/// Outcome of `Runtime::confirm_approval` — communicates whether the confirmation
+/// reached quorum + how many more are needed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApprovalOutcome {
+    pub count: u8,
+    pub quorum: u8,
+    pub quorum_reached: bool,
+    pub phase: Phase,
+}
+
+impl std::fmt::Display for ApprovalOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.quorum_reached {
+            write!(
+                f,
+                "quorum reached at {} ({}-of-{})",
+                self.phase, self.count, self.quorum
+            )
+        } else {
+            write!(
+                f,
+                "approval recorded at {} ({}-of-{}; {} more needed)",
+                self.phase,
+                self.count,
+                self.quorum,
+                self.quorum - self.count
+            )
+        }
+    }
+}
+
 /// One-line phase + sync summary returned by `Runtime::status`.
 #[derive(Debug, Clone)]
 pub struct StatusReport {
@@ -129,6 +160,76 @@ impl Runtime {
         }
     }
 
+    /// Confirm an `OperatorApproval` sync at the current phase. Validates the role is
+    /// in the sync's allowed-roles list; records the confirmation in the galho's
+    /// context; if the quorum is reached, sets `has_approval_quorum` so the next
+    /// `fire_morphism(RecordApproval, ...)` can advance.
+    ///
+    /// Returns an `ApprovalOutcome` describing the count, quorum, and whether the
+    /// quorum was reached by this confirmation.
+    pub async fn confirm_approval(
+        &self,
+        galho: &str,
+        role: &str,
+    ) -> Result<ApprovalOutcome> {
+        let mut ctxs = self.contexts.write().await;
+        let ctx = ctxs
+            .get_mut(galho)
+            .ok_or_else(|| anyhow!("galho '{galho}' not found"))?;
+        let current_phase = ctx.current_phase;
+
+        let sync = self
+            .kb
+            .sync_for(current_phase)
+            .ok_or_else(|| anyhow!("phase {current_phase:?} has no sync config"))?;
+
+        let (allowed_roles, quorum) = match &sync.kind {
+            SyncKind::OperatorApproval { roles, quorum } => (roles.clone(), *quorum),
+            _ => {
+                return Err(anyhow!(
+                    "phase {current_phase:?} sync is not OperatorApproval"
+                ));
+            }
+        };
+
+        if !allowed_roles.iter().any(|r| r == role) {
+            return Err(anyhow!(
+                "role '{role}' not authorized for sync at phase {current_phase:?} (allowed: {allowed_roles:?})"
+            ));
+        }
+
+        let confirmations = ctx
+            .confirmations
+            .entry(current_phase)
+            .or_default();
+        confirmations.insert(role.to_string());
+        let count = confirmations.len() as u8;
+        let quorum_reached = count >= quorum;
+        if quorum_reached {
+            ctx.has_approval_quorum = true;
+        }
+        drop(ctxs);
+
+        // Emit a SyncConfirmed event regardless of quorum status — every confirmation
+        // is a load-bearing audit entry.
+        self.observe(
+            OutcomeEvent::new(OutcomeEventType::SyncConfirmed, galho)
+                .with_phase_transition(current_phase, current_phase)
+                .with_sync(sync.kind.clone())
+                .with_note(format!(
+                    "role={role} count={count}/{quorum}{}",
+                    if quorum_reached { " quorum-reached" } else { "" }
+                )),
+        );
+
+        Ok(ApprovalOutcome {
+            count,
+            quorum,
+            quorum_reached,
+            phase: current_phase,
+        })
+    }
+
     /// Materialize a fresh `MorphismContext` for a new galho. The galho enters in `Declared`.
     pub async fn new_galho(&self, name: &str) -> Result<()> {
         let mut ctxs = self.contexts.write().await;
@@ -165,14 +266,13 @@ impl Runtime {
                 ctx.stack_lock_held = true;
             }
         }
-        // RecordApproval: simulate approver quorum landing on this fire (v0.1 mock;
-        // M4 wires real Sync receipts).
-        if let MorphismId::RecordApproval = morphism {
-            let mut ctxs = self.contexts.write().await;
-            if let Some(ctx) = ctxs.get_mut(name) {
-                ctx.has_approval_quorum = true;
-            }
-        }
+        // RecordApproval: the `has_approval_quorum` flag is driven by `confirm_approval`
+        // against the typed OperatorApproval sync. The morphism's pre-action block here
+        // intentionally does NOT auto-set the flag — quorum is gated by typed
+        // confirmations, not by `fire_morphism` being called.
+        //
+        // Test fixtures that don't care about quorum may pre-set the flag via
+        // `confirm_approval(galho, role)` matching a sync role.
         // Promote: simulate the GitHub merge event having landed.
         if let MorphismId::Promote = morphism {
             let mut ctxs = self.contexts.write().await;

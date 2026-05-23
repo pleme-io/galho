@@ -56,6 +56,11 @@ pub struct MorphismContext {
     pub drift_detected: bool,
     pub conflict_open: bool,
     pub jira_ticket_resolvable: bool,
+    /// Per-phase confirmations recorded via the Sync flow. Keyed on the Phase whose
+    /// boundary is being gated; value is the set of roles that have signed off. Used by
+    /// the controller / Runtime to compute `has_approval_quorum` against typed
+    /// `OperatorApproval { quorum }` syncs.
+    pub confirmations: std::collections::BTreeMap<Phase, std::collections::BTreeSet<String>>,
 }
 
 impl MorphismContext {
@@ -74,7 +79,22 @@ impl MorphismContext {
             drift_detected: false,
             conflict_open: false,
             jira_ticket_resolvable: false,
+            confirmations: std::collections::BTreeMap::new(),
         }
+    }
+
+    /// Count confirmations for a given phase.
+    #[must_use]
+    pub fn confirmation_count(&self, phase: Phase) -> usize {
+        self.confirmations.get(&phase).map_or(0, std::collections::BTreeSet::len)
+    }
+
+    /// Has the given role already confirmed at the given phase?
+    #[must_use]
+    pub fn has_confirmed(&self, phase: Phase, role: &str) -> bool {
+        self.confirmations
+            .get(&phase)
+            .is_some_and(|set| set.contains(role))
     }
 }
 

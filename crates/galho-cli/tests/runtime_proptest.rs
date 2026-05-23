@@ -190,6 +190,10 @@ fn canonical_forward_arc_leaves_chain_intact() {
             .await
             .unwrap();
         runtime
+            .confirm_approval("feature/canonical", "reviewer")
+            .await
+            .unwrap();
+        runtime
             .fire_morphism(
                 "feature/canonical",
                 MorphismId::RecordApproval,
@@ -210,8 +214,8 @@ fn canonical_forward_arc_leaves_chain_intact() {
             .await
             .unwrap();
 
-        // 1 GalhoCreated + 1 StackLockAcquired + 6 MorphismFired = 8 events.
-        assert_eq!(chain.len().await, 8);
+        // 1 GalhoCreated + 1 StackLockAcquired + 1 SyncConfirmed + 6 MorphismFired = 9 events.
+        assert_eq!(chain.len().await, 9);
         assert!(chain.verify_integrity().await.unwrap());
 
         // The entire chain can be walked + every entry's previous_hash matches the

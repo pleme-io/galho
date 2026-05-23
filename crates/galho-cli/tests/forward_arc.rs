@@ -52,7 +52,11 @@ fn full_forward_arc_declared_to_done() {
         assert_eq!(s.stack_lock_root.as_deref(), Some("abc123"));
         assert_eq!(s.stack_lock_holders, 1);
 
-        // RecordApproval → ApprovedAwaitingMerge.
+        // Confirm via typed OperatorApproval sync (default quorum = 1 at this phase).
+        let outcome = r.confirm_approval("feature/test", "reviewer").await.unwrap();
+        assert!(outcome.quorum_reached);
+
+        // RecordApproval → ApprovedAwaitingMerge (now that quorum is met).
         let p = r
             .fire_morphism(
                 "feature/test",

@@ -110,6 +110,10 @@ fn tick_skips_terminal_galhos() {
             .await
             .unwrap();
         runtime
+            .confirm_approval("feature/done", "reviewer")
+            .await
+            .unwrap();
+        runtime
             .fire_morphism("feature/done", MorphismId::RecordApproval, Some("reviewer".into()))
             .await
             .unwrap();
