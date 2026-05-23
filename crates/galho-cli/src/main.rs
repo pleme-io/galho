@@ -422,14 +422,14 @@ async fn print_galho_list(
     }
     println!("{} galhos total, showing {}", galhos.len(), shown.len());
     for g in &shown {
-        let deps_marker = if g.depends_on.is_empty() {
-            String::new()
-        } else if g.all_deps_satisfied() {
-            format!("  deps: ✓ {}", g.depends_on.join(","))
+        let label = if g.all_deps_satisfied() {
+            g.depends_on.join(",")
         } else {
-            let unmet: Vec<_> = g.unmet_deps().into_iter().collect();
-            format!("  deps: ⏸ unmet: {}", unmet.join(","))
+            g.unmet_deps().join(",")
         };
+        let deps_marker = g
+            .render_state()
+            .as_text_marker(!g.depends_on.is_empty(), &label);
         println!("  {} → {}{}", g.name, g.phase.as_str(), deps_marker);
     }
     Ok(())

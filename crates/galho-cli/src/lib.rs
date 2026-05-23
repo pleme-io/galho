@@ -61,6 +61,93 @@ impl GalhoStateSnapshot {
             .map(String::as_str)
             .collect()
     }
+
+    /// Typed render-state classification — the single source of truth that
+    /// every render surface (Mermaid / DOT / JSON / text) consults. Computed
+    /// once from (phase.is_terminal, all_deps_satisfied); each renderer reads
+    /// `as_class_name` / `as_color_hex` / `as_marker` off the result rather
+    /// than re-branching the underlying state.
+    #[must_use]
+    pub fn render_state(&self) -> RenderState {
+        if self.phase.is_terminal() {
+            RenderState::Terminal
+        } else if self.all_deps_satisfied() {
+            RenderState::Ready
+        } else {
+            RenderState::Blocked
+        }
+    }
+}
+
+/// Typed render-state classification used by every render surface. The single
+/// source of truth for "what does this galho's state look like to a human?" —
+/// extracted from three previously-inline branches in MermaidGraph::fmt /
+/// DotGraph::fmt / print_galho_list per the org Prime Directive's three-site
+/// rule.
+///
+/// Serializes as a kebab-case string ("terminal" / "ready" / "blocked") for
+/// JSON consumers; renders to a Mermaid classDef name, DOT fillcolor hex, and
+/// text marker via typed methods. Adding a fourth render surface means adding
+/// one method here, not branching anywhere else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RenderState {
+    /// Done or Destroyed — terminal phase. Greyed out.
+    Terminal,
+    /// Non-terminal, all declared deps satisfied. Green / proceed.
+    Ready,
+    /// Non-terminal, at least one declared dep unmet. Red / waiting.
+    Blocked,
+}
+
+impl RenderState {
+    /// Mermaid classDef name (must be the same identifier the classDef
+    /// declarations at the bottom of the graph use).
+    #[must_use]
+    pub fn as_class_name(self) -> &'static str {
+        match self {
+            Self::Terminal => "terminal",
+            Self::Ready => "ready",
+            Self::Blocked => "blocked",
+        }
+    }
+
+    /// Hex color for DOT fillcolor + Mermaid classDef fill — single source of
+    /// truth across both Display impls.
+    #[must_use]
+    pub fn as_color_hex(self) -> &'static str {
+        match self {
+            Self::Terminal => "#dddddd",
+            Self::Ready => "#ddffdd",
+            Self::Blocked => "#ffdddd",
+        }
+    }
+
+    /// Mermaid classDef stroke color — paired with `as_color_hex` to render
+    /// the box outline.
+    #[must_use]
+    pub fn as_stroke_hex(self) -> &'static str {
+        match self {
+            Self::Terminal => "#666666",
+            Self::Ready => "#339933",
+            Self::Blocked => "#993333",
+        }
+    }
+
+    /// Operator-facing text marker rendered in `galho list`. Returns "" for
+    /// galhos with no declared deps (Ready with no deps means "nothing to
+    /// wait for"; don't add visual noise).
+    #[must_use]
+    pub fn as_text_marker(self, has_deps: bool, deps_label: &str) -> String {
+        if !has_deps {
+            return String::new();
+        }
+        match self {
+            Self::Terminal => format!("  ({deps_label})"),
+            Self::Ready => format!("  deps: ✓ {deps_label}"),
+            Self::Blocked => format!("  deps: ⏸ unmet: {deps_label}"),
+        }
+    }
 }
 
 /// Typed wrapper over a snapshot of the dependency graph at a moment in time.
@@ -111,7 +198,9 @@ impl DepGraph {
 
     /// Render as a typed JSON object suitable for MCP / web / automation
     /// consumers. Edges carry the typed `satisfied` flag mirroring the
-    /// mermaid/dot edge-style encoding — same algebra, third surface.
+    /// mermaid/dot edge-style encoding; nodes include the typed `render_state`
+    /// (terminal/ready/blocked) so JSON consumers see the same classification
+    /// the visual renderers see — same algebra across all four surfaces.
     #[must_use]
     pub fn to_json_value(&self) -> serde_json::Value {
         let edges: Vec<DepGraphJsonEdge> = self
@@ -125,8 +214,22 @@ impl DepGraph {
                 })
             })
             .collect();
+        let nodes: Vec<serde_json::Value> = self
+            .snapshots
+            .iter()
+            .map(|s| {
+                let mut v = serde_json::to_value(s).expect("snapshot serialize");
+                if let serde_json::Value::Object(ref mut obj) = v {
+                    obj.insert(
+                        "render_state".into(),
+                        serde_json::to_value(s.render_state()).expect("render_state serialize"),
+                    );
+                }
+                v
+            })
+            .collect();
         serde_json::json!({
-            "nodes": self.snapshots,
+            "nodes": nodes,
             "edges": edges,
         })
     }
@@ -144,18 +247,12 @@ impl std::fmt::Display for MermaidGraph<'_> {
         }
         for snap in &self.0.snapshots {
             let id = mermaid_id(&snap.name);
-            let phase_class = if snap.phase.is_terminal() {
-                "terminal"
-            } else if snap.all_deps_satisfied() {
-                "ready"
-            } else {
-                "blocked"
-            };
             writeln!(
                 f,
                 "    {id}[\"{name}<br/>{phase}\"]:::{phase_class}",
                 name = snap.name,
                 phase = snap.phase.as_str(),
+                phase_class = snap.render_state().as_class_name(),
             )?;
         }
         for snap in &self.0.snapshots {
@@ -170,9 +267,16 @@ impl std::fmt::Display for MermaidGraph<'_> {
                 writeln!(f, "    {from_id} {edge} {to_id}")?;
             }
         }
-        writeln!(f, "    classDef ready fill:#dfd,stroke:#393")?;
-        writeln!(f, "    classDef blocked fill:#fdd,stroke:#933")?;
-        writeln!(f, "    classDef terminal fill:#ddd,stroke:#666")?;
+        // classDef declarations derive from RenderState — single source of truth.
+        for state in [RenderState::Ready, RenderState::Blocked, RenderState::Terminal] {
+            writeln!(
+                f,
+                "    classDef {name} fill:{fill},stroke:{stroke}",
+                name = state.as_class_name(),
+                fill = state.as_color_hex(),
+                stroke = state.as_stroke_hex(),
+            )?;
+        }
         Ok(())
     }
 }
@@ -191,18 +295,12 @@ impl std::fmt::Display for DotGraph<'_> {
             return Ok(());
         }
         for snap in &self.0.snapshots {
-            let color = if snap.phase.is_terminal() {
-                "#dddddd"
-            } else if snap.all_deps_satisfied() {
-                "#ddffdd"
-            } else {
-                "#ffdddd"
-            };
             writeln!(
                 f,
                 "    \"{name}\" [label=\"{name}\\n{phase}\", fillcolor=\"{color}\", style=\"rounded,filled\"];",
                 name = snap.name,
                 phase = snap.phase.as_str(),
+                color = snap.render_state().as_color_hex(),
             )?;
         }
         for snap in &self.0.snapshots {
