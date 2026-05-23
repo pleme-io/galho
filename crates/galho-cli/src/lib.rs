@@ -31,7 +31,11 @@ use tokio::sync::RwLock;
 
 /// Snapshot of a single galho's typed state — phase + declared deps + satisfied deps.
 /// Returned by `Runtime::list_galhos_with_state` for CLI rendering.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Serializes to JSON for MCP / automation / web-UI consumers — the typed surface
+/// is the algebra; format is a render concern. All field names are kebab-stable
+/// so external consumers can rely on the shape.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GalhoStateSnapshot {
     pub name: String,
     pub phase: Phase,
@@ -60,15 +64,26 @@ impl GalhoStateSnapshot {
 }
 
 /// Typed wrapper over a snapshot of the dependency graph at a moment in time.
-/// Provides typed `Display` impls for Mermaid and DOT — both are typed AST
-/// renderers per the org-wide ★★ TYPED EMISSION rule (no `format!()` for
-/// composition; only `writeln!` inside `Display` impls).
+/// Provides typed `Display` impls for Mermaid and DOT, plus typed JSON via
+/// `to_json_value()` — all three are typed AST renderers per the org-wide ★★
+/// TYPED EMISSION rule (no `format!()` for composition; only `writeln!` inside
+/// `Display` impls + `serde_json::to_value` for JSON).
 ///
 /// Composes downstream with MCP/web/PR-comment consumers without needing
 /// duplicate format logic.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct DepGraph {
     pub snapshots: Vec<GalhoStateSnapshot>,
+}
+
+/// Typed JSON edge — used by `DepGraph::to_json_value()`. Mirrors the typed edge
+/// semantics that Mermaid/DOT renderers express via line style: `satisfied=true`
+/// is the solid edge; `satisfied=false` is the dashed edge.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DepGraphJsonEdge {
+    pub from: String,
+    pub to: String,
+    pub satisfied: bool,
 }
 
 impl DepGraph {
@@ -92,6 +107,28 @@ impl DepGraph {
     #[must_use]
     pub fn to_dot(&self) -> DotGraph<'_> {
         DotGraph(self)
+    }
+
+    /// Render as a typed JSON object suitable for MCP / web / automation
+    /// consumers. Edges carry the typed `satisfied` flag mirroring the
+    /// mermaid/dot edge-style encoding — same algebra, third surface.
+    #[must_use]
+    pub fn to_json_value(&self) -> serde_json::Value {
+        let edges: Vec<DepGraphJsonEdge> = self
+            .snapshots
+            .iter()
+            .flat_map(|s| {
+                s.depends_on.iter().map(move |dep| DepGraphJsonEdge {
+                    from: dep.clone(),
+                    to: s.name.clone(),
+                    satisfied: s.deps_satisfied.contains(dep),
+                })
+            })
+            .collect();
+        serde_json::json!({
+            "nodes": self.snapshots,
+            "edges": edges,
+        })
     }
 }
 

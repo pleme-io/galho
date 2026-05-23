@@ -249,13 +249,13 @@ async fn main() -> Result<()> {
             println!("checkpoint OK");
         }
         Command::List { terminal } => {
-            print_galho_list(&rt, terminal).await?;
+            print_galho_list(&rt, terminal, &cli.output).await?;
         }
         Command::Deps => {
-            print_dep_graph(&rt).await?;
+            print_dep_graph(&rt, &cli.output).await?;
         }
         Command::Graph { format } => {
-            print_graph_typed(&rt, format).await?;
+            print_graph_typed(&rt, format, &cli.output).await?;
         }
         Command::Knowledge { .. } | Command::Audit { .. } => unreachable!("handled above"),
     }
@@ -399,15 +399,28 @@ async fn confirm(rt: &Runtime, galho: Option<String>, role: String) -> Result<()
     Ok(())
 }
 
-async fn print_galho_list(rt: &Runtime, include_terminal: bool) -> Result<()> {
+async fn print_galho_list(
+    rt: &Runtime,
+    include_terminal: bool,
+    output: &OutputFormat,
+) -> Result<()> {
     let mut galhos = rt.list_galhos_with_state().await;
     galhos.sort_by(|a, b| a.name.cmp(&b.name));
-    let total = galhos.len();
     let shown: Vec<_> = galhos
-        .into_iter()
+        .iter()
         .filter(|g| include_terminal || !g.phase.is_terminal())
+        .cloned()
         .collect();
-    println!("{} galhos total, showing {}", total, shown.len());
+    if matches!(output, OutputFormat::Json) {
+        let payload = serde_json::json!({
+            "total": galhos.len(),
+            "shown": shown.len(),
+            "galhos": shown,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(());
+    }
+    println!("{} galhos total, showing {}", galhos.len(), shown.len());
     for g in &shown {
         let deps_marker = if g.depends_on.is_empty() {
             String::new()
@@ -422,10 +435,20 @@ async fn print_galho_list(rt: &Runtime, include_terminal: bool) -> Result<()> {
     Ok(())
 }
 
-async fn print_graph_typed(rt: &Runtime, format: GraphFormat) -> Result<()> {
+async fn print_graph_typed(
+    rt: &Runtime,
+    format: GraphFormat,
+    output: &OutputFormat,
+) -> Result<()> {
     use galho_cli::DepGraph;
     let snaps = rt.list_galhos_with_state().await;
     let graph = DepGraph::new(snaps);
+    // --output json overrides --format (the typed JSON surface is the algebra-faithful
+    // representation; mermaid/dot are pretty-renderers for humans/PRs).
+    if matches!(output, OutputFormat::Json) {
+        println!("{}", serde_json::to_string_pretty(&graph.to_json_value())?);
+        return Ok(());
+    }
     match format {
         GraphFormat::Mermaid => print!("{}", graph.to_mermaid()),
         GraphFormat::Dot => print!("{}", graph.to_dot()),
@@ -433,11 +456,20 @@ async fn print_graph_typed(rt: &Runtime, format: GraphFormat) -> Result<()> {
     Ok(())
 }
 
-async fn print_dep_graph(rt: &Runtime) -> Result<()> {
+async fn print_dep_graph(rt: &Runtime, output: &OutputFormat) -> Result<()> {
     let mut galhos = rt.list_galhos_with_state().await;
     galhos.sort_by(|a, b| a.name.cmp(&b.name));
     let total = galhos.len();
     let with_deps: Vec<_> = galhos.iter().filter(|g| !g.depends_on.is_empty()).collect();
+    if matches!(output, OutputFormat::Json) {
+        let payload = serde_json::json!({
+            "total": total,
+            "with_deps": with_deps.len(),
+            "galhos": with_deps.iter().map(|g| (*g).clone()).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(());
+    }
     println!(
         "dependency graph — {} galhos total, {} with declared deps",
         total,
