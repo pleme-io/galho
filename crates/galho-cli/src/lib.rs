@@ -446,16 +446,16 @@ impl Runtime {
     }
 
     /// Persist every galho context + active stack lock to the runtime's `ObjectStore`,
-    /// so a subsequent `restore_from` reconstitutes the same Runtime state. Idempotent:
-    /// repeated checkpoints with no changes write the same content-addressed bytes.
+    /// so a subsequent `restore_from` reconstitutes the same Runtime state.
     ///
     /// Storage layout:
-    /// - One object per galho context, indexed under meta-kind `runtime/context` with
-    ///   meta-key = galho name.
-    /// - One object per stack lock, indexed under meta-kind `runtime/stack_lock` with
-    ///   meta-key = stack root SHA.
+    /// - One content-addressed object per context / lock (BLAKE3-hashed bytes).
+    /// - One ref `runtime/contexts/<name>` per galho, exclusive — CAS-updated to point
+    ///   at the current context hash.
+    /// - One ref `runtime/locks/<root>` per active stack lock.
     ///
-    /// Stable across sessions: same store → same restored state.
+    /// Refs are exclusive per name (not meta-blob-indexed) so multiple checkpoints
+    /// of the same name advance the ref deterministically — no stale-object shadowing.
     pub async fn checkpoint(&self) -> Result<()> {
         let backend: &dyn galho_storage::ObjectStore = match &self.backend {
             RuntimeBackend::Memory(s) => s.as_ref(),
@@ -470,10 +470,13 @@ impl Runtime {
                 .put_object(&bytes)
                 .await
                 .with_context(|| format!("put context for galho '{name}'"))?;
+            let ref_name = format!("runtime/contexts/{name}");
+            // CAS against current value to make concurrent writers fail-loud.
+            let current = backend.read_ref(&ref_name).await?;
             backend
-                .put_meta(&hash, "runtime/context", name.as_bytes())
+                .cas_ref(&ref_name, current.as_ref(), &hash)
                 .await
-                .with_context(|| format!("index context for galho '{name}'"))?;
+                .with_context(|| format!("cas ref for galho '{name}'"))?;
         }
 
         let locks = self.locks.read().await;
@@ -484,10 +487,13 @@ impl Runtime {
                 .put_object(&bytes)
                 .await
                 .with_context(|| format!("put lock for root '{root}'"))?;
+            // Encode root in the ref path; refs accept '/' so use a sanitized form.
+            let ref_name = format!("runtime/locks/{}", root.replace('/', "_"));
+            let current = backend.read_ref(&ref_name).await?;
             backend
-                .put_meta(&hash, "runtime/stack_lock", root.as_bytes())
+                .cas_ref(&ref_name, current.as_ref(), &hash)
                 .await
-                .with_context(|| format!("index lock for root '{root}'"))?;
+                .with_context(|| format!("cas ref for lock root '{root}'"))?;
         }
         Ok(())
     }
@@ -495,10 +501,6 @@ impl Runtime {
     /// Reconstitute a Runtime from a previously-checkpointed `ObjectStore`. The
     /// emitter is supplied at restore time so consumers can attach an audit chain,
     /// memory collector, or noop emitter independently of the persisted state.
-    ///
-    /// Reads every object with meta-kind `runtime/context` and `runtime/stack_lock`,
-    /// deserializes them, and populates the in-memory maps. Galho names are recovered
-    /// from the meta-key bytes; stack-root SHAs likewise.
     pub async fn restore_from(
         backend: RuntimeBackend,
         emitter: Arc<dyn OutcomeEmitter>,
@@ -511,29 +513,30 @@ impl Runtime {
         let mut contexts: BTreeMap<String, galho_types::MorphismContext> = BTreeMap::new();
         let mut locks: BTreeMap<String, galho_types::StackLock> = BTreeMap::new();
 
-        for hash in store.list_objects().await? {
-            if let Some(name_bytes) = store.get_meta(&hash, "runtime/context").await? {
-                let name = String::from_utf8(name_bytes)
-                    .context("context meta key is valid UTF-8")?;
-                let bytes = store
-                    .get_object(&hash)
-                    .await?
-                    .ok_or_else(|| anyhow!("context object missing for galho '{name}'"))?;
+        for ref_path in store.list_refs().await? {
+            if let Some(name) = ref_path.strip_prefix("runtime/contexts/") {
+                let Some(hash) = store.read_ref(&ref_path).await? else {
+                    continue;
+                };
+                let Some(bytes) = store.get_object(&hash).await? else {
+                    continue;
+                };
                 let ctx: galho_types::MorphismContext = serde_json::from_slice(&bytes)
                     .with_context(|| format!("decode context for galho '{name}'"))?;
-                contexts.insert(name, ctx);
+                contexts.insert(name.to_string(), ctx);
                 continue;
             }
-            if let Some(root_bytes) = store.get_meta(&hash, "runtime/stack_lock").await? {
-                let root = String::from_utf8(root_bytes)
-                    .context("stack-lock meta key is valid UTF-8")?;
-                let bytes = store
-                    .get_object(&hash)
-                    .await?
-                    .ok_or_else(|| anyhow!("lock object missing for root '{root}'"))?;
+            if let Some(root_sanitized) = ref_path.strip_prefix("runtime/locks/") {
+                let Some(hash) = store.read_ref(&ref_path).await? else {
+                    continue;
+                };
+                let Some(bytes) = store.get_object(&hash).await? else {
+                    continue;
+                };
                 let lock: galho_types::StackLock = serde_json::from_slice(&bytes)
-                    .with_context(|| format!("decode lock for root '{root}'"))?;
-                locks.insert(root, lock);
+                    .with_context(|| format!("decode lock for root '{root_sanitized}'"))?;
+                // The lock carries its own stack_root field — use that as the in-memory key.
+                locks.insert(lock.stack_root.as_str().to_string(), lock);
             }
         }
 

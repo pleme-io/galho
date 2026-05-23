@@ -60,12 +60,28 @@ enum Command {
         stack_root: String,
     },
 
-    /// Fire `RecordApproval` (AppliedPendingReview → ApprovedAwaitingMerge).
+    /// Record an OperatorApproval sync confirmation. When the typed quorum is reached,
+    /// the next `approve` (or controller tick) advances the phase. Validates `role`
+    /// against the active sync's declared roles.
+    Confirm {
+        /// Reviewer role (must appear in the active OperatorApproval sync's `roles` list).
+        #[arg(long)]
+        role: String,
+    },
+
+    /// Fire `RecordApproval` (AppliedPendingReview → ApprovedAwaitingMerge). Requires
+    /// the typed quorum at the current phase to have been reached via prior `confirm`
+    /// calls — failure surfaces `ApprovalQuorumMissing`.
     Approve {
         /// Approver role (must match `OperatorApproval` sync's `roles`).
         #[arg(long)]
         role: String,
     },
+
+    /// Manually checkpoint the current Runtime state to the --root store. With --root,
+    /// every CLI invocation already auto-checkpoints; this command is for forcing a
+    /// checkpoint mid-session.
+    Checkpoint,
 
     /// Fire `Promote` (ApprovedAwaitingMerge → Merged). Commit-only per ★★ GITOPS-NATIVE —
     /// never touches cloud directly.
@@ -134,37 +150,77 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    // Local-only mode for v0.1. M4 will add `--controller <endpoint>` for controller-attached mode.
-    let rt = match cli.root {
-        Some(p) => Runtime::with_local_fs(p).await?,
-        None => Runtime::with_memory(),
-    };
+    // Auto-restore from --root if present (cross-session continuity); otherwise in-memory.
+    // Knowledge subcommands don't need Runtime state; they query the static KnowledgeBase.
+    if matches!(cli.command, Command::Knowledge { .. }) {
+        if let Command::Knowledge { query } = cli.command {
+            galho_cli::run_knowledge_query(query.into(), cli.output.into())?;
+        }
+        return Ok(());
+    }
+
+    let (rt, persist) = make_runtime(cli.root.clone()).await?;
 
     match cli.command {
         Command::New => {
-            let name = cli.galho.context("--galho is required (auto-detection from git lands at M2.5)")?;
+            let name = cli.galho.clone().context("--galho is required (auto-detection from git lands at M2.5)")?;
             rt.new_galho(&name).await?;
             print_status(&rt, &name).await?;
         }
         Command::Status => {
-            let name = cli.galho.context("--galho required")?;
+            let name = cli.galho.clone().context("--galho required")?;
             print_status(&rt, &name).await?;
         }
-        Command::Plan => fire(&rt, cli.galho, MorphismId::Plan, None).await?,
-        Command::Apply { stack_root } => fire(&rt, cli.galho, MorphismId::ApplyToPreview, Some(stack_root)).await?,
-        Command::Approve { role } => fire(&rt, cli.galho, MorphismId::RecordApproval, Some(role)).await?,
-        Command::Promote => fire(&rt, cli.galho, MorphismId::Promote, None).await?,
-        Command::Verify => fire(&rt, cli.galho, MorphismId::Verify, None).await?,
-        Command::Done => fire(&rt, cli.galho, MorphismId::SealDone, None).await?,
-        Command::Rollback => fire(&rt, cli.galho, MorphismId::RevertApply, None).await?,
-        Command::Resume => fire(&rt, cli.galho, MorphismId::Resume, None).await?,
-        Command::Reconcile => fire(&rt, cli.galho, MorphismId::DriftReconcile, None).await?,
-        Command::Recover => fire(&rt, cli.galho, MorphismId::Recover, None).await?,
-        Command::Abandon => fire(&rt, cli.galho, MorphismId::Abandon, None).await?,
-        Command::Escalate => fire(&rt, cli.galho, MorphismId::Escalate, None).await?,
-        Command::Knowledge { query } => galho_cli::run_knowledge_query(query.into(), cli.output.into())?,
+        Command::Plan => fire(&rt, cli.galho.clone(), MorphismId::Plan, None).await?,
+        Command::Apply { ref stack_root } => fire(&rt, cli.galho.clone(), MorphismId::ApplyToPreview, Some(stack_root.clone())).await?,
+        Command::Confirm { ref role } => confirm(&rt, cli.galho.clone(), role.clone()).await?,
+        Command::Approve { ref role } => fire(&rt, cli.galho.clone(), MorphismId::RecordApproval, Some(role.clone())).await?,
+        Command::Promote => fire(&rt, cli.galho.clone(), MorphismId::Promote, None).await?,
+        Command::Verify => fire(&rt, cli.galho.clone(), MorphismId::Verify, None).await?,
+        Command::Done => fire(&rt, cli.galho.clone(), MorphismId::SealDone, None).await?,
+        Command::Rollback => fire(&rt, cli.galho.clone(), MorphismId::RevertApply, None).await?,
+        Command::Resume => fire(&rt, cli.galho.clone(), MorphismId::Resume, None).await?,
+        Command::Reconcile => fire(&rt, cli.galho.clone(), MorphismId::DriftReconcile, None).await?,
+        Command::Recover => fire(&rt, cli.galho.clone(), MorphismId::Recover, None).await?,
+        Command::Abandon => fire(&rt, cli.galho.clone(), MorphismId::Abandon, None).await?,
+        Command::Escalate => fire(&rt, cli.galho.clone(), MorphismId::Escalate, None).await?,
+        Command::Checkpoint => {
+            rt.checkpoint().await.context("checkpoint failed")?;
+            println!("checkpoint OK");
+        }
+        Command::Knowledge { .. } => unreachable!("handled above"),
     }
 
+    // Auto-checkpoint on exit when --root is in play.
+    if persist {
+        rt.checkpoint().await.context("auto-checkpoint failed")?;
+    }
+    Ok(())
+}
+
+/// Build a Runtime + report whether auto-checkpoint should fire on exit.
+async fn make_runtime(root: Option<PathBuf>) -> Result<(Runtime, bool)> {
+    use galho_cli::RuntimeBackend;
+    use galho_storage::backends::LocalFsBackend;
+    use galho_types::{LogOutcomeEmitter, OutcomeEmitter};
+    use std::sync::Arc;
+
+    match root {
+        Some(p) => {
+            let backend = RuntimeBackend::LocalFs(Arc::new(LocalFsBackend::new(p)));
+            let emitter: Arc<dyn OutcomeEmitter> = Arc::new(LogOutcomeEmitter);
+            let rt = Runtime::restore_from(backend, emitter).await?;
+            Ok((rt, true))
+        }
+        None => Ok((Runtime::with_memory(), false)),
+    }
+}
+
+async fn confirm(rt: &Runtime, galho: Option<String>, role: String) -> Result<()> {
+    let name = galho.context("--galho required")?;
+    let outcome = rt.confirm_approval(&name, &role).await?;
+    println!("{outcome}");
+    print_status(rt, &name).await?;
     Ok(())
 }
 
