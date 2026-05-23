@@ -1,5 +1,7 @@
 # galho
 
+skip-format-ban: migration in progress — see `crates/galho-cli/tests/format_ban_guard.rs` for the typed migration ratchet (count cannot grow). 47 remaining call sites as of 2026-05-22 after extracting `TextMarker` + `SyncSummary` typed Display newtypes; ratchet test fails if any new code grows the count. Remove waiver + add workspace `clippy.toml` (`disallowed_macros = ["std::format"]`) when CEILING reaches 0.
+
 Branch-aware typed IaC state (caixa Biblioteca kind).
 
 > **Theory:** `pleme-io/theory/GALHO.md`

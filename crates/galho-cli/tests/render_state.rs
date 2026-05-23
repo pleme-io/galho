@@ -139,15 +139,15 @@ fn colors_are_distinct() {
 
 #[test]
 fn text_marker_omits_for_no_deps() {
-    assert_eq!(RenderState::Ready.as_text_marker(false, ""), "");
-    assert_eq!(RenderState::Blocked.as_text_marker(false, ""), "");
-    assert_eq!(RenderState::Terminal.as_text_marker(false, ""), "");
+    assert_eq!(RenderState::Ready.text_marker(false, "").to_string(), "");
+    assert_eq!(RenderState::Blocked.text_marker(false, "").to_string(), "");
+    assert_eq!(RenderState::Terminal.text_marker(false, "").to_string(), "");
 }
 
 #[test]
 fn text_marker_distinguishes_states_when_deps_present() {
-    let ready = RenderState::Ready.as_text_marker(true, "upstream");
-    let blocked = RenderState::Blocked.as_text_marker(true, "upstream");
+    let ready = RenderState::Ready.text_marker(true, "upstream").to_string();
+    let blocked = RenderState::Blocked.text_marker(true, "upstream").to_string();
     assert!(ready.contains("✓"));
     assert!(blocked.contains("⏸"));
     assert_ne!(ready, blocked);

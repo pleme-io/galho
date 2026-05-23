@@ -436,7 +436,7 @@ async fn print_galho_list(
         };
         let deps_marker = g
             .render_state()
-            .as_text_marker(!g.depends_on.is_empty(), &label);
+            .text_marker(!g.depends_on.is_empty(), &label);
         println!("  {} → {}{}", g.name, g.phase.as_str(), deps_marker);
     }
     Ok(())

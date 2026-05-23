@@ -134,18 +134,39 @@ impl RenderState {
         }
     }
 
-    /// Operator-facing text marker rendered in `galho list`. Returns "" for
-    /// galhos with no declared deps (Ready with no deps means "nothing to
-    /// wait for"; don't add visual noise).
+    /// Operator-facing text marker rendered in `galho list`. Returns a typed
+    /// `TextMarker<'_>` Display newtype — the typed AST renderer (★★ TYPED
+    /// EMISSION surface 3); composes via `write!()` inside its Display impl,
+    /// not `format!()`.
     #[must_use]
-    pub fn as_text_marker(self, has_deps: bool, deps_label: &str) -> String {
-        if !has_deps {
-            return String::new();
+    pub fn text_marker<'a>(self, has_deps: bool, deps_label: &'a str) -> TextMarker<'a> {
+        TextMarker {
+            state: self,
+            has_deps,
+            deps_label,
         }
-        match self {
-            Self::Terminal => format!("  ({deps_label})"),
-            Self::Ready => format!("  deps: ✓ {deps_label}"),
-            Self::Blocked => format!("  deps: ⏸ unmet: {deps_label}"),
+    }
+}
+
+/// Typed Display newtype for the "  deps: ✓ x,y" / "  deps: ⏸ unmet: x,y" /
+/// "  (x,y)" marker rendered next to each galho in `galho list`. The Display
+/// impl is the typed render surface (★★ TYPED EMISSION surface 1); no
+/// `format!()` composition.
+pub struct TextMarker<'a> {
+    state: RenderState,
+    has_deps: bool,
+    deps_label: &'a str,
+}
+
+impl std::fmt::Display for TextMarker<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if !self.has_deps {
+            return Ok(());
+        }
+        match self.state {
+            RenderState::Terminal => write!(f, "  ({})", self.deps_label),
+            RenderState::Ready => write!(f, "  deps: ✓ {}", self.deps_label),
+            RenderState::Blocked => write!(f, "  deps: ⏸ unmet: {}", self.deps_label),
         }
     }
 }
@@ -900,7 +921,7 @@ impl Runtime {
         let phase = ctx.current_phase;
         let forward = self.kb.forward_morphisms_from(phase);
         let backward = self.kb.backward_morphisms_from(phase);
-        let sync_summary = self.kb.sync_for(phase).map(summarize_sync);
+        let sync_summary = self.kb.sync_for(phase).map(|s| summarize_sync(s).to_string());
 
         let locks = self.locks.read().await;
         let (lock_root, lock_holders) = locks
@@ -1053,15 +1074,29 @@ impl Runtime {
     }
 }
 
-fn summarize_sync(s: &SyncConfig) -> String {
-    match &s.kind {
-        SyncKind::Automatic => "automatic".into(),
-        SyncKind::OperatorApproval { roles, quorum } => {
-            format!("operator-approval {quorum}-of-{} ({})", roles.len(), roles.join(","))
+fn summarize_sync(s: &SyncConfig) -> SyncSummary<'_> {
+    SyncSummary(s)
+}
+
+/// Typed Display newtype for `SyncConfig` summaries. Replaces the previous
+/// `format!()`-composed `summarize_sync(&SyncConfig) -> String` with a typed
+/// AST renderer (★★ TYPED EMISSION surface 1).
+pub struct SyncSummary<'a>(&'a SyncConfig);
+
+impl std::fmt::Display for SyncSummary<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.0.kind {
+            SyncKind::Automatic => write!(f, "automatic"),
+            SyncKind::OperatorApproval { roles, quorum } => write!(
+                f,
+                "operator-approval {quorum}-of-{} ({})",
+                roles.len(),
+                roles.join(","),
+            ),
+            SyncKind::ExternalSignal { source } => write!(f, "external-signal {source:?}"),
+            SyncKind::TimeBased { soak } => write!(f, "time-based soak={}s", soak.whole_seconds()),
+            SyncKind::AttestationGated { regime, .. } => write!(f, "attestation-gated {regime:?}"),
         }
-        SyncKind::ExternalSignal { source } => format!("external-signal {source:?}"),
-        SyncKind::TimeBased { soak } => format!("time-based soak={}s", soak.whole_seconds()),
-        SyncKind::AttestationGated { regime, .. } => format!("attestation-gated {regime:?}"),
     }
 }
 
