@@ -9,6 +9,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::phase::{MorphismId, Phase};
 
+// MorphismContext + MorphismRequirement need serde for Runtime checkpoint/restore.
+// Other typed primitives in this module either derive their own serde or are pure
+// trait surfaces (no data).
+
 /// One typed phase transition. Implementors:
 ///
 /// - Declare the `(from, to)` phase pair.
@@ -42,8 +46,9 @@ pub trait PhaseMorphism: Send + Sync + 'static {
 }
 
 /// Context the morphism evaluates against. Owned by the controller / CLI; passed
-/// by reference to `check_preconditions`.
-#[derive(Debug, Clone)]
+/// by reference to `check_preconditions`. Serializable so Runtime can checkpoint
+/// to + restore from an `ObjectStore` across process restarts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MorphismContext {
     pub current_phase: Phase,
     pub galho_name: String,
