@@ -232,17 +232,59 @@ impl Runtime {
 
     /// Materialize a fresh `MorphismContext` for a new galho. The galho enters in `Declared`.
     pub async fn new_galho(&self, name: &str) -> Result<()> {
+        self.new_galho_with_deps(name, Vec::new()).await
+    }
+
+    /// Like `new_galho` but the galho declares typed dependencies. `Promote` is gated
+    /// until every dep reaches `Verified` or `Done` — operationally enforces the
+    /// stacked-PR dependency-ordering invariant carve creates at PR-stack time.
+    pub async fn new_galho_with_deps(
+        &self,
+        name: &str,
+        deps: impl IntoIterator<Item = String>,
+    ) -> Result<()> {
+        let deps: std::collections::BTreeSet<String> = deps.into_iter().collect();
         let mut ctxs = self.contexts.write().await;
         if ctxs.contains_key(name) {
             return Err(anyhow!("galho '{name}' already exists"));
         }
-        ctxs.insert(name.to_string(), MorphismContext::declared(name));
+        let mut ctx = MorphismContext::declared(name);
+        ctx.depends_on = deps.clone();
+        ctxs.insert(name.to_string(), ctx);
+        // Mark this galho as satisfying its own deps for any galhos that already
+        // depended on it (rare on creation, but defensive).
+        Self::propagate_dep_satisfaction(&mut ctxs);
         drop(ctxs);
         self.observe(
             OutcomeEvent::new(OutcomeEventType::GalhoCreated, name)
-                .with_phase_transition(Phase::Declared, Phase::Declared),
+                .with_phase_transition(Phase::Declared, Phase::Declared)
+                .with_note(if deps.is_empty() {
+                    String::new()
+                } else {
+                    format!("deps={}", deps.iter().cloned().collect::<Vec<_>>().join(","))
+                }),
         );
         Ok(())
+    }
+
+    /// Recompute every galho's `deps_satisfied` set from the current snapshot of all
+    /// galho phases. A dep is satisfied iff the dep-galho exists AND is in Verified
+    /// or Done. Run after any phase advancement so downstream galhos see the change.
+    fn propagate_dep_satisfaction(ctxs: &mut BTreeMap<String, MorphismContext>) {
+        let snapshot: BTreeMap<String, Phase> = ctxs
+            .iter()
+            .map(|(n, c)| (n.clone(), c.current_phase))
+            .collect();
+        for ctx in ctxs.values_mut() {
+            ctx.deps_satisfied.clear();
+            for dep in &ctx.depends_on {
+                if let Some(phase) = snapshot.get(dep) {
+                    if matches!(phase, Phase::Verified | Phase::Done) {
+                        ctx.deps_satisfied.insert(dep.clone());
+                    }
+                }
+            }
+        }
     }
 
     /// Fire a typed morphism. Returns the new phase or the typed precondition failure.
@@ -336,6 +378,9 @@ impl Runtime {
         let from_phase = ctx.current_phase;
         ctx.current_phase = next_phase;
         Self::update_flags_post_morphism(ctx, morphism, next_phase, extra);
+        // Recompute every galho's dep-satisfaction set so downstream galhos see the
+        // phase change (e.g. galho-a → Verified unblocks galho-b's Promote).
+        Self::propagate_dep_satisfaction(&mut ctxs);
         drop(ctxs);
 
         // Emit the typed outcome event.

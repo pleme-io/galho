@@ -66,6 +66,16 @@ pub struct MorphismContext {
     /// the controller / Runtime to compute `has_approval_quorum` against typed
     /// `OperatorApproval { quorum }` syncs.
     pub confirmations: std::collections::BTreeMap<Phase, std::collections::BTreeSet<String>>,
+    /// Names of galhos this galho depends on. Promote is gated by ALL dependencies
+    /// reaching a "done-enough" phase (Verified or Done) — operationally enforces the
+    /// stacked-PR dependency-ordering invariant carve creates at PR-stack time.
+    #[serde(default)]
+    pub depends_on: std::collections::BTreeSet<String>,
+    /// Tracks which deps have been observed as `done-enough`. The Runtime maintains
+    /// this as deps advance — when this becomes a superset of `depends_on`, the
+    /// `DependencyNotMet` check passes for Promote.
+    #[serde(default)]
+    pub deps_satisfied: std::collections::BTreeSet<String>,
 }
 
 impl MorphismContext {
@@ -85,7 +95,20 @@ impl MorphismContext {
             conflict_open: false,
             jira_ticket_resolvable: false,
             confirmations: std::collections::BTreeMap::new(),
+            depends_on: std::collections::BTreeSet::new(),
+            deps_satisfied: std::collections::BTreeSet::new(),
         }
+    }
+
+    /// Same as `declared` but with explicit dependencies.
+    #[must_use]
+    pub fn declared_with_deps(
+        galho_name: impl Into<String>,
+        deps: impl IntoIterator<Item = String>,
+    ) -> Self {
+        let mut ctx = Self::declared(galho_name);
+        ctx.depends_on = deps.into_iter().collect();
+        ctx
     }
 
     /// Count confirmations for a given phase.
@@ -100,6 +123,21 @@ impl MorphismContext {
         self.confirmations
             .get(&phase)
             .is_some_and(|set| set.contains(role))
+    }
+
+    /// All dependencies satisfied? True when `deps_satisfied ⊇ depends_on`.
+    #[must_use]
+    pub fn all_deps_satisfied(&self) -> bool {
+        self.depends_on.is_subset(&self.deps_satisfied)
+    }
+
+    /// List of currently-unmet dependencies (deps that haven't reached "done-enough").
+    #[must_use]
+    pub fn unmet_deps(&self) -> Vec<String> {
+        self.depends_on
+            .difference(&self.deps_satisfied)
+            .cloned()
+            .collect()
     }
 }
 
@@ -117,6 +155,9 @@ pub enum MorphismRequirement {
     DriftPresent,
     ConflictOpen,
     JiraTicketUnresolvable,
+    /// One or more galhos this galho depends on have not yet reached a "done-enough"
+    /// phase (Verified / Done). Enforces stacked-PR dependency ordering.
+    DependencyNotMet { unmet: Vec<String> },
 }
 
 // ===== Concrete forward morphisms =====
@@ -204,6 +245,9 @@ morphism! {
     preconditions: |ctx, missing| {
         if !ctx.has_approval_quorum { missing.push(MorphismRequirement::ApprovalQuorumMissing); }
         if !ctx.has_merge_event { missing.push(MorphismRequirement::MergeEventMissing); }
+        if !ctx.all_deps_satisfied() {
+            missing.push(MorphismRequirement::DependencyNotMet { unmet: ctx.unmet_deps() });
+        }
     }
 }
 
