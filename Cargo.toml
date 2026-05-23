@@ -5,6 +5,7 @@ members = [
     "crates/galho-storage",
     "crates/galho-cli",
     "crates/galho-controller",
+    "crates/galho-terraform",
 ]
 
 [workspace.package]

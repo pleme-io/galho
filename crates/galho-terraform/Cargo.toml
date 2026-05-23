@@ -1,0 +1,24 @@
+[package]
+name = "galho-terraform"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Reference IaCSystem adapter for Terraform — the canonical first consumer of galho-types::IaCSystem. Bidirectional translation between Terraform tfstate v4 JSON and galho's canonical Resource Graph IR. M3 reference impl; v0.1 ships state read/write + apply_semantics declaration; magma integration lands at M3.1."
+
+[dependencies]
+anyhow            = { workspace = true }
+serde             = { workspace = true }
+serde_json        = { workspace = true }
+thiserror         = { workspace = true }
+time              = { workspace = true }
+tracing           = { workspace = true }
+
+galho-types       = { workspace = true }
+
+[dev-dependencies]
+proptest          = { workspace = true }
+tempfile          = { workspace = true }
+galho-types       = { workspace = true, features = ["testing"] }

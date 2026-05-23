@@ -44,7 +44,12 @@ enum OutputFormat {
 #[derive(Subcommand)]
 enum Command {
     /// Create a new galho in the `Declared` phase.
-    New,
+    New {
+        /// Typed dependency on another galho. Repeat for multiple deps. Each named
+        /// galho must reach `Verified` or `Done` before this galho's `Promote` fires.
+        #[arg(long = "depends-on")]
+        depends_on: Vec<String>,
+    },
 
     /// Show current phase + available forward / backward morphisms + active Sync.
     Status,
@@ -184,9 +189,13 @@ async fn main() -> Result<()> {
     let (rt, persist) = make_runtime(cli.root.clone()).await?;
 
     match cli.command {
-        Command::New => {
+        Command::New { ref depends_on } => {
             let name = cli.galho.clone().context("--galho is required (auto-detection from git lands at M2.5)")?;
-            rt.new_galho(&name).await?;
+            if depends_on.is_empty() {
+                rt.new_galho(&name).await?;
+            } else {
+                rt.new_galho_with_deps(&name, depends_on.clone()).await?;
+            }
             print_status(&rt, &name).await?;
         }
         Command::Status => {

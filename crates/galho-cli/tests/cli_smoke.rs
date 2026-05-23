@@ -178,6 +178,62 @@ fn audit_limit_clamps_output_to_recent_entries() {
 }
 
 #[test]
+fn depends_on_flag_persists_across_invocations_and_gates_promote() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().to_string_lossy().to_string();
+
+    // Create galho-a (no deps) and galho-b (depends on a).
+    binary()
+        .args(["--root", &root, "--galho", "a", "new"])
+        .output()
+        .unwrap();
+    binary()
+        .args([
+            "--root", &root, "--galho", "b", "new", "--depends-on", "a",
+        ])
+        .output()
+        .unwrap();
+
+    // Drive b up to ApprovedAwaitingMerge.
+    binary().args(["--root", &root, "--galho", "b", "plan"]).output().unwrap();
+    binary()
+        .args([
+            "--root", &root, "--galho", "b", "apply", "--stack-root", "stack",
+        ])
+        .output()
+        .unwrap();
+    binary()
+        .args([
+            "--root", &root, "--galho", "b", "confirm", "--role", "reviewer",
+        ])
+        .output()
+        .unwrap();
+    binary()
+        .args([
+            "--root", &root, "--galho", "b", "approve", "--role", "reviewer",
+        ])
+        .output()
+        .unwrap();
+
+    // Promote should fail with DependencyNotMet.
+    let out = binary()
+        .args(["--root", &root, "--galho", "b", "promote"])
+        .output()
+        .expect("promote");
+    assert!(
+        !out.status.success(),
+        "expected promote to fail; stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("DependencyNotMet") || stderr.contains("dependency"),
+        "expected DependencyNotMet in stderr, got: {stderr}"
+    );
+}
+
+#[test]
 fn checkpoint_subcommand_succeeds() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path().to_string_lossy().to_string();
