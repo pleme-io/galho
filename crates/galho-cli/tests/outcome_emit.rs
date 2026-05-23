@@ -118,7 +118,7 @@ fn destroyed_phase_emits_dedicated_event() {
 }
 
 #[test]
-fn blocked_morphism_does_not_emit_morphism_fired() {
+fn blocked_morphism_does_not_emit_morphism_fired_but_does_emit_blocked() {
     rt().block_on(async {
         let (r, em) = make_runtime();
         r.new_galho("feature/blocked").await.unwrap();
@@ -127,9 +127,43 @@ fn blocked_morphism_does_not_emit_morphism_fired() {
             .fire_morphism("feature/blocked", MorphismId::ApplyToPreview, Some("root".into()))
             .await;
         assert!(result.is_err());
-        // GalhoCreated emitted; no MorphismFired since the morphism didn't fire.
-        // Stack lock acquire ALSO happens before the precondition check (the pre-action
-        // block fires it for the side-effect); document that here.
+        // No MorphismFired since the morphism didn't actually fire.
+        assert_eq!(em.count_of(OutcomeEventType::MorphismFired), 0);
+        // BUT — exactly one MorphismBlocked event records the attempted-but-failed move.
+        assert_eq!(em.count_of(OutcomeEventType::MorphismBlocked), 1);
+
+        let blocked = em
+            .snapshot()
+            .into_iter()
+            .find(|e| e.event_type == OutcomeEventType::MorphismBlocked)
+            .unwrap();
+        assert_eq!(blocked.galho_name, "feature/blocked");
+        assert_eq!(blocked.morphism, Some(MorphismId::ApplyToPreview));
+        // The note carries the typed missing-requirements list.
+        let note = blocked.note.unwrap_or_default();
+        assert!(
+            note.contains("missing"),
+            "blocked event note should reference missing requirements, got: {note}"
+        );
+        assert!(
+            note.contains("WrongPhase") || note.contains("PlanMissing"),
+            "blocked event note should reference typed requirement, got: {note}"
+        );
+    });
+}
+
+#[test]
+fn multiple_blocked_attempts_each_emit_distinct_events() {
+    rt().block_on(async {
+        let (r, em) = make_runtime();
+        r.new_galho("g").await.unwrap();
+        // Three attempts at ApplyToPreview from Declared — all blocked.
+        for _ in 0..3 {
+            let _ = r
+                .fire_morphism("g", MorphismId::ApplyToPreview, Some("root".into()))
+                .await;
+        }
+        assert_eq!(em.count_of(OutcomeEventType::MorphismBlocked), 3);
         assert_eq!(em.count_of(OutcomeEventType::MorphismFired), 0);
     });
 }

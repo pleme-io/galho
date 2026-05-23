@@ -300,17 +300,38 @@ impl Runtime {
             .get_mut(name)
             .ok_or_else(|| anyhow!("galho '{name}' not found; run `galho new` first"))?;
 
-        let next_phase = self.kb.apply_morphism(morphism, ctx).map_err(|missing| {
-            anyhow!(
-                "preconditions not satisfied for {}: {}",
-                morphism,
-                missing
-                    .iter()
-                    .map(|m| format!("{m:?}"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
-        })?;
+        let next_phase = match self.kb.apply_morphism(morphism, ctx) {
+            Ok(p) => p,
+            Err(missing) => {
+                // Emit a MorphismBlocked event so the auditor can see attempted-but-blocked
+                // operator actions. Drop ctxs first so the observe() can take its own lock if needed.
+                let blocked_phase = ctx.current_phase;
+                let note = format!(
+                    "missing: {}",
+                    missing
+                        .iter()
+                        .map(|m| format!("{m:?}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+                drop(ctxs);
+                self.observe(
+                    OutcomeEvent::new(OutcomeEventType::MorphismBlocked, name)
+                        .with_phase_transition(blocked_phase, blocked_phase)
+                        .with_morphism(morphism)
+                        .with_note(note.clone()),
+                );
+                return Err(anyhow!(
+                    "preconditions not satisfied for {}: {}",
+                    morphism,
+                    missing
+                        .iter()
+                        .map(|m| format!("{m:?}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+        };
 
         let from_phase = ctx.current_phase;
         ctx.current_phase = next_phase;
