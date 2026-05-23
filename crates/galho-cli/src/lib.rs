@@ -59,6 +59,136 @@ impl GalhoStateSnapshot {
     }
 }
 
+/// Typed wrapper over a snapshot of the dependency graph at a moment in time.
+/// Provides typed `Display` impls for Mermaid and DOT — both are typed AST
+/// renderers per the org-wide ★★ TYPED EMISSION rule (no `format!()` for
+/// composition; only `writeln!` inside `Display` impls).
+///
+/// Composes downstream with MCP/web/PR-comment consumers without needing
+/// duplicate format logic.
+#[derive(Debug, Clone)]
+pub struct DepGraph {
+    pub snapshots: Vec<GalhoStateSnapshot>,
+}
+
+impl DepGraph {
+    #[must_use]
+    pub fn new(mut snapshots: Vec<GalhoStateSnapshot>) -> Self {
+        snapshots.sort_by(|a, b| a.name.cmp(&b.name));
+        Self { snapshots }
+    }
+
+    /// Render as Mermaid `graph LR` syntax suitable for paste into a GitHub PR
+    /// description (GitHub renders Mermaid in fenced ```` ```mermaid```` blocks).
+    /// Each node carries its phase as a label; each declared dep becomes a typed
+    /// directed edge (solid = satisfied, dashed = unmet).
+    #[must_use]
+    pub fn to_mermaid(&self) -> MermaidGraph<'_> {
+        MermaidGraph(self)
+    }
+
+    /// Render as Graphviz DOT syntax. Same semantics as `to_mermaid`; different
+    /// consumer (operator's graphviz workflow, IDE plugins).
+    #[must_use]
+    pub fn to_dot(&self) -> DotGraph<'_> {
+        DotGraph(self)
+    }
+}
+
+/// Display newtype: writes Mermaid syntax for the wrapped DepGraph.
+pub struct MermaidGraph<'a>(&'a DepGraph);
+
+impl std::fmt::Display for MermaidGraph<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "graph LR")?;
+        if self.0.snapshots.is_empty() {
+            writeln!(f, "    %% (no galhos)")?;
+            return Ok(());
+        }
+        for snap in &self.0.snapshots {
+            let id = mermaid_id(&snap.name);
+            let phase_class = if snap.phase.is_terminal() {
+                "terminal"
+            } else if snap.all_deps_satisfied() {
+                "ready"
+            } else {
+                "blocked"
+            };
+            writeln!(
+                f,
+                "    {id}[\"{name}<br/>{phase}\"]:::{phase_class}",
+                name = snap.name,
+                phase = snap.phase.as_str(),
+            )?;
+        }
+        for snap in &self.0.snapshots {
+            let to_id = mermaid_id(&snap.name);
+            for dep in &snap.depends_on {
+                let from_id = mermaid_id(dep);
+                let edge = if snap.deps_satisfied.contains(dep) {
+                    "-->"
+                } else {
+                    "-.->"
+                };
+                writeln!(f, "    {from_id} {edge} {to_id}")?;
+            }
+        }
+        writeln!(f, "    classDef ready fill:#dfd,stroke:#393")?;
+        writeln!(f, "    classDef blocked fill:#fdd,stroke:#933")?;
+        writeln!(f, "    classDef terminal fill:#ddd,stroke:#666")?;
+        Ok(())
+    }
+}
+
+/// Display newtype: writes Graphviz DOT syntax for the wrapped DepGraph.
+pub struct DotGraph<'a>(&'a DepGraph);
+
+impl std::fmt::Display for DotGraph<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "digraph galho {{")?;
+        writeln!(f, "    rankdir=LR;")?;
+        writeln!(f, "    node [shape=box, style=rounded];")?;
+        if self.0.snapshots.is_empty() {
+            writeln!(f, "    // (no galhos)")?;
+            writeln!(f, "}}")?;
+            return Ok(());
+        }
+        for snap in &self.0.snapshots {
+            let color = if snap.phase.is_terminal() {
+                "#dddddd"
+            } else if snap.all_deps_satisfied() {
+                "#ddffdd"
+            } else {
+                "#ffdddd"
+            };
+            writeln!(
+                f,
+                "    \"{name}\" [label=\"{name}\\n{phase}\", fillcolor=\"{color}\", style=\"rounded,filled\"];",
+                name = snap.name,
+                phase = snap.phase.as_str(),
+            )?;
+        }
+        for snap in &self.0.snapshots {
+            for dep in &snap.depends_on {
+                let style = if snap.deps_satisfied.contains(dep) {
+                    "solid"
+                } else {
+                    "dashed"
+                };
+                writeln!(f, "    \"{dep}\" -> \"{name}\" [style={style}];", name = snap.name)?;
+            }
+        }
+        writeln!(f, "}}")
+    }
+}
+
+/// Mermaid identifiers must be alphanumeric + underscore; sanitize a galho name.
+fn mermaid_id(name: &str) -> String {
+    name.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect()
+}
+
 /// Detect whether adding `(new_galho, deps)` to the existing dep graph would
 /// introduce a cycle. Returns `Some(path)` describing the cycle if found, `None`
 /// if cycle-free. The returned path starts at `new_galho` and ends at `new_galho`

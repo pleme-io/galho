@@ -41,6 +41,12 @@ enum OutputFormat {
     Json,
 }
 
+#[derive(Clone, Debug, clap::ValueEnum)]
+enum GraphFormat {
+    Mermaid,
+    Dot,
+}
+
 #[derive(Subcommand)]
 enum Command {
     /// Create a new galho in the `Declared` phase.
@@ -100,6 +106,16 @@ enum Command {
     /// deps, unmet deps, current phase. Operator UX for "why is this galho's Promote
     /// still blocked?"
     Deps,
+
+    /// Render the dependency graph as Mermaid or DOT syntax. Operator pastes the
+    /// Mermaid output directly into a GitHub PR description (GitHub renders Mermaid
+    /// natively in fenced ```mermaid blocks). DOT output for graphviz workflows
+    /// and IDE plugins.
+    Graph {
+        /// Output format. Defaults to mermaid.
+        #[arg(long, default_value = "mermaid")]
+        format: GraphFormat,
+    },
 
     /// Print the operator's typed audit chain from the --root store. Walks the
     /// hash-linked OutcomeChain in sequence order; verifies integrity end-to-end.
@@ -237,6 +253,9 @@ async fn main() -> Result<()> {
         }
         Command::Deps => {
             print_dep_graph(&rt).await?;
+        }
+        Command::Graph { format } => {
+            print_graph_typed(&rt, format).await?;
         }
         Command::Knowledge { .. } | Command::Audit { .. } => unreachable!("handled above"),
     }
@@ -399,6 +418,17 @@ async fn print_galho_list(rt: &Runtime, include_terminal: bool) -> Result<()> {
             format!("  deps: ⏸ unmet: {}", unmet.join(","))
         };
         println!("  {} → {}{}", g.name, g.phase.as_str(), deps_marker);
+    }
+    Ok(())
+}
+
+async fn print_graph_typed(rt: &Runtime, format: GraphFormat) -> Result<()> {
+    use galho_cli::DepGraph;
+    let snaps = rt.list_galhos_with_state().await;
+    let graph = DepGraph::new(snaps);
+    match format {
+        GraphFormat::Mermaid => print!("{}", graph.to_mermaid()),
+        GraphFormat::Dot => print!("{}", graph.to_dot()),
     }
     Ok(())
 }
