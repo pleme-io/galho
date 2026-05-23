@@ -11,7 +11,7 @@
 
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 use galho_cli::Runtime;
 use galho_types::MorphismId;
@@ -85,10 +85,18 @@ enum Command {
 
     /// Print the operator's typed audit chain from the --root store. Walks the
     /// hash-linked OutcomeChain in sequence order; verifies integrity end-to-end.
+    /// With --baseline, verifies the chain against a typed compliance regime and
+    /// reports any violations.
     Audit {
         /// Print the N most-recent entries. Default 20. Pass 0 for "all".
         #[arg(long, default_value_t = 20)]
         limit: usize,
+
+        /// Verify the chain against a typed compliance regime baseline.
+        /// One of: pci-dss-4-0, soc-ii, fed-ramp-moderate, fed-ramp-high, iso-27001,
+        /// iso-27701, hipaa, dora, fips-140-3.
+        #[arg(long)]
+        baseline: Option<String>,
     },
 
     /// Fire `Promote` (ApprovedAwaitingMerge → Merged). Commit-only per ★★ GITOPS-NATIVE —
@@ -168,9 +176,9 @@ async fn main() -> Result<()> {
     }
 
     // Audit subcommand reads the chain directly without constructing a Runtime.
-    if let Command::Audit { limit } = cli.command {
+    if let Command::Audit { limit, baseline } = &cli.command {
         let root = cli.root.clone().context("--root required for `audit`")?;
-        return print_audit(root, limit).await;
+        return print_audit(root, *limit, baseline.clone()).await;
     }
 
     let (rt, persist) = make_runtime(cli.root.clone()).await?;
@@ -239,8 +247,9 @@ async fn make_runtime(root: Option<PathBuf>) -> Result<(Runtime, bool)> {
 }
 
 /// Print the operator's typed audit chain from `<root>`. Reads via `OutcomeChain::restore`
-/// + `entries()`; verifies integrity end-to-end.
-async fn print_audit(root: PathBuf, limit: usize) -> Result<()> {
+/// + `entries()`; verifies integrity end-to-end. With `baseline`, also runs the typed
+/// compliance verifier and reports per-regime status + violations.
+async fn print_audit(root: PathBuf, limit: usize, baseline: Option<String>) -> Result<()> {
     use galho_storage::{backends::LocalFsBackend, OutcomeChain};
     use std::sync::Arc;
 
@@ -290,7 +299,49 @@ async fn print_audit(root: PathBuf, limit: usize) -> Result<()> {
         "integrity: {}",
         if ok { "OK" } else { "BROKEN" }
     );
+
+    if let Some(baseline_str) = baseline {
+        let regime = parse_regime(&baseline_str)?;
+        let report = galho_storage::verify_regime(&chain, regime).await?;
+        println!();
+        println!("compliance baseline: {:?}", report.regime);
+        println!("status: {}", report.status);
+        println!("rules evaluated: {}", report.rules_evaluated.len());
+        println!("violations: {}", report.violations.len());
+        for v in &report.violations {
+            let galho = v.galho_name.as_deref().unwrap_or("-");
+            let seq = v
+                .sequence
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "-".into());
+            println!("  [{}] {} {} {}", seq, v.rule, galho, v.detail);
+        }
+        if !report.galho_summary.is_empty() {
+            println!("per-galho violation counts:");
+            for (name, count) in &report.galho_summary {
+                println!("  {name}: {count}");
+            }
+        }
+    }
     Ok(())
+}
+
+fn parse_regime(s: &str) -> Result<galho_types::ComplianceRegime> {
+    use galho_types::ComplianceRegime;
+    match s {
+        "pci-dss-4-0" | "pci-dss-4.0" | "pci" => Ok(ComplianceRegime::PciDss4_0),
+        "soc-ii" | "soc2" | "soc" => Ok(ComplianceRegime::SocII),
+        "fed-ramp-moderate" | "fedramp-moderate" => Ok(ComplianceRegime::FedRampModerate),
+        "fed-ramp-high" | "fedramp-high" => Ok(ComplianceRegime::FedRampHigh),
+        "iso-27001" | "iso27001" => Ok(ComplianceRegime::Iso27001),
+        "iso-27701" | "iso27701" => Ok(ComplianceRegime::Iso27701),
+        "hipaa" => Ok(ComplianceRegime::Hipaa),
+        "dora" => Ok(ComplianceRegime::Dora),
+        "fips-140-3" | "fips140" => Ok(ComplianceRegime::Fips140_3),
+        other => Err(anyhow!(
+            "unknown compliance baseline '{other}' (expected one of: pci-dss-4-0, soc-ii, fed-ramp-moderate, fed-ramp-high, iso-27001, iso-27701, hipaa, dora, fips-140-3)"
+        )),
+    }
 }
 
 async fn confirm(rt: &Runtime, galho: Option<String>, role: String) -> Result<()> {

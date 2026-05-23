@@ -18,6 +18,7 @@
 #![allow(clippy::module_name_repetitions, clippy::missing_errors_doc)]
 
 pub mod canonical;
+pub mod compliance;
 pub mod conflict;
 pub mod config;
 pub mod derive;
@@ -66,6 +67,9 @@ pub use morphism::{
 pub use phase::{
     is_known_transition, transition_table, transitions_from, transitions_to, MorphismId, Phase,
     PhaseClass, PhaseTransition,
+};
+pub use compliance::{
+    ComplianceBaseline, ComplianceReport, ComplianceRule, ComplianceStatus, ComplianceViolation,
 };
 pub use outcome::{
     EmitError, LogOutcomeEmitter, MemoryOutcomeEmitter, NoopOutcomeEmitter, OutcomeEmitter,
