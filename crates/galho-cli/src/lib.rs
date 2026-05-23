@@ -29,6 +29,90 @@ use serde::Serialize;
 use time::Duration;
 use tokio::sync::RwLock;
 
+/// Snapshot of a single galho's typed state — phase + declared deps + satisfied deps.
+/// Returned by `Runtime::list_galhos_with_state` for CLI rendering.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GalhoStateSnapshot {
+    pub name: String,
+    pub phase: Phase,
+    pub depends_on: Vec<String>,
+    pub deps_satisfied: Vec<String>,
+}
+
+impl GalhoStateSnapshot {
+    /// Convenience: are all declared deps satisfied?
+    #[must_use]
+    pub fn all_deps_satisfied(&self) -> bool {
+        self.depends_on
+            .iter()
+            .all(|d| self.deps_satisfied.contains(d))
+    }
+
+    /// Convenience: unmet deps for this snapshot.
+    #[must_use]
+    pub fn unmet_deps(&self) -> Vec<&str> {
+        self.depends_on
+            .iter()
+            .filter(|d| !self.deps_satisfied.contains(d))
+            .map(String::as_str)
+            .collect()
+    }
+}
+
+/// Detect whether adding `(new_galho, deps)` to the existing dep graph would
+/// introduce a cycle. Returns `Some(path)` describing the cycle if found, `None`
+/// if cycle-free. The returned path starts at `new_galho` and ends at `new_galho`
+/// (i.e. the cycle closes).
+///
+/// Algorithm: DFS from each dep of `new_galho` through existing transitive deps;
+/// if we ever revisit `new_galho`, the path is the cycle.
+pub fn detect_dep_cycle(
+    contexts: &BTreeMap<String, MorphismContext>,
+    new_galho: &str,
+    new_deps: &std::collections::BTreeSet<String>,
+) -> Option<Vec<String>> {
+    // Self-loop is the trivial direct cycle.
+    if new_deps.contains(new_galho) {
+        return Some(vec![new_galho.to_string(), new_galho.to_string()]);
+    }
+    // DFS from each declared dep; track visit path; if path revisits new_galho, cycle.
+    for dep in new_deps {
+        let mut path = vec![new_galho.to_string(), dep.clone()];
+        let mut visited: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        if dfs_finds_cycle(contexts, new_galho, dep, &mut path, &mut visited) {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn dfs_finds_cycle(
+    contexts: &BTreeMap<String, MorphismContext>,
+    target: &str,
+    current: &str,
+    path: &mut Vec<String>,
+    visited: &mut std::collections::BTreeSet<String>,
+) -> bool {
+    if !visited.insert(current.to_string()) {
+        return false;
+    }
+    let Some(ctx) = contexts.get(current) else {
+        return false;
+    };
+    for next in &ctx.depends_on {
+        if next == target {
+            path.push(next.clone());
+            return true;
+        }
+        path.push(next.clone());
+        if dfs_finds_cycle(contexts, target, next, path, visited) {
+            return true;
+        }
+        path.pop();
+    }
+    false
+}
+
 /// Outcome of `Runtime::confirm_approval` — communicates whether the confirmation
 /// reached quorum + how many more are needed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -238,6 +322,11 @@ impl Runtime {
     /// Like `new_galho` but the galho declares typed dependencies. `Promote` is gated
     /// until every dep reaches `Verified` or `Done` — operationally enforces the
     /// stacked-PR dependency-ordering invariant carve creates at PR-stack time.
+    ///
+    /// Refuses to create a galho that would introduce a dependency cycle. The check
+    /// walks the would-be dep graph (existing galhos + the new one); on cycle, returns
+    /// a typed error naming the cycle path. This prevents the silent "deps never
+    /// satisfy" failure mode where a → b → a would forever block both Promotes.
     pub async fn new_galho_with_deps(
         &self,
         name: &str,
@@ -247,6 +336,12 @@ impl Runtime {
         let mut ctxs = self.contexts.write().await;
         if ctxs.contains_key(name) {
             return Err(anyhow!("galho '{name}' already exists"));
+        }
+        if let Some(cycle) = detect_dep_cycle(&ctxs, name, &deps) {
+            return Err(anyhow!(
+                "dependency cycle: {}",
+                cycle.join(" → ")
+            ));
         }
         let mut ctx = MorphismContext::declared(name);
         ctx.depends_on = deps.clone();
@@ -509,6 +604,22 @@ impl Runtime {
     /// (BTreeMap iteration). Used by the controller's tick loop.
     pub async fn list_galhos(&self) -> Vec<String> {
         self.contexts.read().await.keys().cloned().collect()
+    }
+
+    /// Snapshot of every galho's (name, current_phase, declared deps, satisfied deps).
+    /// Used by `galho list` + `galho deps` subcommands.
+    pub async fn list_galhos_with_state(&self) -> Vec<GalhoStateSnapshot> {
+        self.contexts
+            .read()
+            .await
+            .iter()
+            .map(|(name, ctx)| GalhoStateSnapshot {
+                name: name.clone(),
+                phase: ctx.current_phase,
+                depends_on: ctx.depends_on.iter().cloned().collect(),
+                deps_satisfied: ctx.deps_satisfied.iter().cloned().collect(),
+            })
+            .collect()
     }
 
     /// Persist every galho context + active stack lock to the runtime's `ObjectStore`,

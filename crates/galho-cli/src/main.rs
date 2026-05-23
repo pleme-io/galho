@@ -88,6 +88,19 @@ enum Command {
     /// checkpoint mid-session.
     Checkpoint,
 
+    /// List every known galho with its current phase. Defaults to all galhos; pass
+    /// --terminal to include Done/Destroyed galhos in the output.
+    List {
+        /// Include terminal-phase galhos (Done, Destroyed) in the listing.
+        #[arg(long)]
+        terminal: bool,
+    },
+
+    /// Print the dependency graph for every known galho — declared deps, satisfied
+    /// deps, unmet deps, current phase. Operator UX for "why is this galho's Promote
+    /// still blocked?"
+    Deps,
+
     /// Print the operator's typed audit chain from the --root store. Walks the
     /// hash-linked OutcomeChain in sequence order; verifies integrity end-to-end.
     /// With --baseline, verifies the chain against a typed compliance regime and
@@ -218,6 +231,12 @@ async fn main() -> Result<()> {
         Command::Checkpoint => {
             rt.checkpoint().await.context("checkpoint failed")?;
             println!("checkpoint OK");
+        }
+        Command::List { terminal } => {
+            print_galho_list(&rt, terminal).await?;
+        }
+        Command::Deps => {
+            print_dep_graph(&rt).await?;
         }
         Command::Knowledge { .. } | Command::Audit { .. } => unreachable!("handled above"),
     }
@@ -358,6 +377,64 @@ async fn confirm(rt: &Runtime, galho: Option<String>, role: String) -> Result<()
     let outcome = rt.confirm_approval(&name, &role).await?;
     println!("{outcome}");
     print_status(rt, &name).await?;
+    Ok(())
+}
+
+async fn print_galho_list(rt: &Runtime, include_terminal: bool) -> Result<()> {
+    let mut galhos = rt.list_galhos_with_state().await;
+    galhos.sort_by(|a, b| a.name.cmp(&b.name));
+    let total = galhos.len();
+    let shown: Vec<_> = galhos
+        .into_iter()
+        .filter(|g| include_terminal || !g.phase.is_terminal())
+        .collect();
+    println!("{} galhos total, showing {}", total, shown.len());
+    for g in &shown {
+        let deps_marker = if g.depends_on.is_empty() {
+            String::new()
+        } else if g.all_deps_satisfied() {
+            format!("  deps: ✓ {}", g.depends_on.join(","))
+        } else {
+            let unmet: Vec<_> = g.unmet_deps().into_iter().collect();
+            format!("  deps: ⏸ unmet: {}", unmet.join(","))
+        };
+        println!("  {} → {}{}", g.name, g.phase.as_str(), deps_marker);
+    }
+    Ok(())
+}
+
+async fn print_dep_graph(rt: &Runtime) -> Result<()> {
+    let mut galhos = rt.list_galhos_with_state().await;
+    galhos.sort_by(|a, b| a.name.cmp(&b.name));
+    let total = galhos.len();
+    let with_deps: Vec<_> = galhos.iter().filter(|g| !g.depends_on.is_empty()).collect();
+    println!(
+        "dependency graph — {} galhos total, {} with declared deps",
+        total,
+        with_deps.len()
+    );
+    if with_deps.is_empty() {
+        println!("(no declared dependencies)");
+        return Ok(());
+    }
+    for g in &with_deps {
+        let unmet: Vec<_> = g.unmet_deps().into_iter().collect();
+        let status = if g.all_deps_satisfied() {
+            "satisfied"
+        } else {
+            "blocked"
+        };
+        println!(
+            "  {} [{}] depends_on: [{}] — {}",
+            g.name,
+            g.phase.as_str(),
+            g.depends_on.join(", "),
+            status,
+        );
+        if !unmet.is_empty() {
+            println!("    unmet: {}", unmet.join(", "));
+        }
+    }
     Ok(())
 }
 
