@@ -112,6 +112,72 @@ fn knowledge_subcommand_lists_phases_without_runtime() {
 }
 
 #[test]
+fn outcome_chain_survives_across_invocations_with_integrity() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().to_string_lossy().to_string();
+
+    binary()
+        .args(["--root", &root, "--galho", "g", "new"])
+        .output()
+        .unwrap();
+    binary()
+        .args(["--root", &root, "--galho", "g", "plan"])
+        .output()
+        .unwrap();
+    binary()
+        .args([
+            "--root", &root, "--galho", "g", "apply", "--stack-root", "abc",
+        ])
+        .output()
+        .unwrap();
+
+    let out = binary()
+        .args(["--root", &root, "audit", "--limit", "100"])
+        .output()
+        .expect("audit");
+    assert!(out.status.success(), "audit failed: {}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    // The chain has at least:
+    //   GalhoCreated (g)
+    //   MorphismFired (plan) Declared → Planned
+    //   StackLockAcquired
+    //   MorphismFired (apply_to_preview) Planned → AppliedPendingReview
+    // Spread across three separate processes.
+    assert!(stdout.contains("galho_created"), "stdout: {stdout}");
+    assert!(stdout.contains("morphism_fired"), "stdout: {stdout}");
+    assert!(stdout.contains("stack_lock_acquired"), "stdout: {stdout}");
+    assert!(stdout.contains("plan"), "stdout: {stdout}");
+    assert!(stdout.contains("apply_to_preview"), "stdout: {stdout}");
+    // Integrity holds across the WHOLE chain, regardless of process boundaries.
+    assert!(stdout.contains("integrity: OK"), "stdout: {stdout}");
+}
+
+#[test]
+fn audit_limit_clamps_output_to_recent_entries() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().to_string_lossy().to_string();
+
+    binary()
+        .args(["--root", &root, "--galho", "g", "new"])
+        .output()
+        .unwrap();
+    binary()
+        .args(["--root", &root, "--galho", "g", "plan"])
+        .output()
+        .unwrap();
+
+    let out = binary()
+        .args(["--root", &root, "audit", "--limit", "1"])
+        .output()
+        .expect("audit");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("showing 1"), "stdout: {stdout}");
+    // The single entry should be the MOST RECENT (the plan morphism, not the original create).
+    assert!(stdout.contains("morphism_fired"), "stdout: {stdout}");
+}
+
+#[test]
 fn checkpoint_subcommand_succeeds() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path().to_string_lossy().to_string();

@@ -83,6 +83,14 @@ enum Command {
     /// checkpoint mid-session.
     Checkpoint,
 
+    /// Print the operator's typed audit chain from the --root store. Walks the
+    /// hash-linked OutcomeChain in sequence order; verifies integrity end-to-end.
+    Audit {
+        /// Print the N most-recent entries. Default 20. Pass 0 for "all".
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+
     /// Fire `Promote` (ApprovedAwaitingMerge → Merged). Commit-only per ★★ GITOPS-NATIVE —
     /// never touches cloud directly.
     Promote,
@@ -159,6 +167,12 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Audit subcommand reads the chain directly without constructing a Runtime.
+    if let Command::Audit { limit } = cli.command {
+        let root = cli.root.clone().context("--root required for `audit`")?;
+        return print_audit(root, limit).await;
+    }
+
     let (rt, persist) = make_runtime(cli.root.clone()).await?;
 
     match cli.command {
@@ -188,7 +202,7 @@ async fn main() -> Result<()> {
             rt.checkpoint().await.context("checkpoint failed")?;
             println!("checkpoint OK");
         }
-        Command::Knowledge { .. } => unreachable!("handled above"),
+        Command::Knowledge { .. } | Command::Audit { .. } => unreachable!("handled above"),
     }
 
     // Auto-checkpoint on exit when --root is in play.
@@ -199,21 +213,84 @@ async fn main() -> Result<()> {
 }
 
 /// Build a Runtime + report whether auto-checkpoint should fire on exit.
+///
+/// When `--root` is set, both the persistent state AND the audit chain share the
+/// same on-disk store. Every Runtime transition emits an event that lands in the
+/// hash-linked OutcomeChain — surviving across sessions for `galho audit` queries.
 async fn make_runtime(root: Option<PathBuf>) -> Result<(Runtime, bool)> {
     use galho_cli::RuntimeBackend;
-    use galho_storage::backends::LocalFsBackend;
-    use galho_types::{LogOutcomeEmitter, OutcomeEmitter};
+    use galho_storage::{backends::LocalFsBackend, ChainedOutcomeEmitter, OutcomeChain};
+    use galho_types::OutcomeEmitter;
     use std::sync::Arc;
 
     match root {
         Some(p) => {
-            let backend = RuntimeBackend::LocalFs(Arc::new(LocalFsBackend::new(p)));
-            let emitter: Arc<dyn OutcomeEmitter> = Arc::new(LogOutcomeEmitter);
+            let store = Arc::new(LocalFsBackend::new(p));
+            let backend = RuntimeBackend::LocalFs(store.clone());
+            // Restore the chain from the same store. New sessions pick up where prior
+            // sessions stopped — verify_integrity holds across the whole accumulated chain.
+            let chain = Arc::new(OutcomeChain::restore(store).await?);
+            let emitter: Arc<dyn OutcomeEmitter> = Arc::new(ChainedOutcomeEmitter::new(chain));
             let rt = Runtime::restore_from(backend, emitter).await?;
             Ok((rt, true))
         }
         None => Ok((Runtime::with_memory(), false)),
     }
+}
+
+/// Print the operator's typed audit chain from `<root>`. Reads via `OutcomeChain::restore`
+/// + `entries()`; verifies integrity end-to-end.
+async fn print_audit(root: PathBuf, limit: usize) -> Result<()> {
+    use galho_storage::{backends::LocalFsBackend, OutcomeChain};
+    use std::sync::Arc;
+
+    let store = Arc::new(LocalFsBackend::new(root));
+    let chain = OutcomeChain::restore(store).await?;
+    let entries = chain.entries().await?;
+    let total = entries.len();
+
+    let slice: Vec<_> = if limit == 0 {
+        entries
+    } else {
+        entries.into_iter().skip(total.saturating_sub(limit)).collect()
+    };
+
+    println!("audit chain — {} total entries, showing {}", total, slice.len());
+    for entry in &slice {
+        let morphism = entry
+            .event
+            .morphism
+            .as_ref()
+            .map(|m| m.as_str())
+            .unwrap_or("-");
+        let from = entry
+            .event
+            .from_phase
+            .as_ref()
+            .map(|p| p.as_str())
+            .unwrap_or("-");
+        let to = entry
+            .event
+            .to_phase
+            .as_ref()
+            .map(|p| p.as_str())
+            .unwrap_or("-");
+        println!(
+            "  [{:>4}] {} {} {} {} → {}",
+            entry.sequence,
+            entry.event.event_type,
+            entry.event.galho_name,
+            morphism,
+            from,
+            to,
+        );
+    }
+    let ok = chain.verify_integrity().await?;
+    println!(
+        "integrity: {}",
+        if ok { "OK" } else { "BROKEN" }
+    );
+    Ok(())
 }
 
 async fn confirm(rt: &Runtime, galho: Option<String>, role: String) -> Result<()> {
