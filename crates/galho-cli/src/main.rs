@@ -115,6 +115,13 @@ enum Command {
         /// Output format. Defaults to mermaid.
         #[arg(long, default_value = "mermaid")]
         format: GraphFormat,
+
+        /// Print the content-addressed signature (BLAKE3 hex) alongside the
+        /// rendering. Operator pastes the hash into PR descriptions to attest
+        /// "the carve stack at review time was this exact shape" — same stack
+        /// produces the same hash, cryptographically checkable later.
+        #[arg(long)]
+        hash: bool,
     },
 
     /// Print the operator's typed audit chain from the --root store. Walks the
@@ -254,8 +261,8 @@ async fn main() -> Result<()> {
         Command::Deps => {
             print_dep_graph(&rt, &cli.output).await?;
         }
-        Command::Graph { format } => {
-            print_graph_typed(&rt, format, &cli.output).await?;
+        Command::Graph { format, hash } => {
+            print_graph_typed(&rt, format, hash, &cli.output).await?;
         }
         Command::Knowledge { .. } | Command::Audit { .. } => unreachable!("handled above"),
     }
@@ -438,16 +445,32 @@ async fn print_galho_list(
 async fn print_graph_typed(
     rt: &Runtime,
     format: GraphFormat,
+    emit_hash: bool,
     output: &OutputFormat,
 ) -> Result<()> {
     use galho_cli::DepGraph;
     let snaps = rt.list_galhos_with_state().await;
     let graph = DepGraph::new(snaps);
-    // --output json overrides --format (the typed JSON surface is the algebra-faithful
-    // representation; mermaid/dot are pretty-renderers for humans/PRs).
+    // --output json overrides --format. JSON shape includes the typed hash when
+    // --hash flag is set; mermaid/dot prepend the hash as a comment line.
     if matches!(output, OutputFormat::Json) {
-        println!("{}", serde_json::to_string_pretty(&graph.to_json_value())?);
+        let mut value = graph.to_json_value();
+        if emit_hash {
+            if let serde_json::Value::Object(ref mut obj) = value {
+                obj.insert(
+                    "content_hash".into(),
+                    serde_json::Value::String(graph.content_hash_hex()),
+                );
+            }
+        }
+        println!("{}", serde_json::to_string_pretty(&value)?);
         return Ok(());
+    }
+    if emit_hash {
+        match format {
+            GraphFormat::Mermaid => println!("%% galho stack signature: {}", graph.content_hash_hex()),
+            GraphFormat::Dot => println!("// galho stack signature: {}", graph.content_hash_hex()),
+        }
     }
     match format {
         GraphFormat::Mermaid => print!("{}", graph.to_mermaid()),

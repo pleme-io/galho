@@ -173,6 +173,47 @@ pub struct DepGraphJsonEdge {
     pub satisfied: bool,
 }
 
+// ----- Canonical-bytes impls: deterministic, content-addressable surface -----
+
+impl galho_types::CanonicalBytes for GalhoStateSnapshot {
+    fn canonical_bytes(&self, sink: &mut galho_types::CanonicalSink) {
+        use galho_types::canonical::tag;
+        // Tagged-string fields keep the canonical envelope discriminator.
+        sink.write_tagged_str(tag::STRING, &self.name);
+        sink.write_tagged_str(tag::STRING, self.phase.as_str());
+        // Deps are sorted into a BTreeSet so two equivalent inputs (different
+        // insertion order) produce byte-identical canonical streams.
+        let sorted_deps: std::collections::BTreeSet<&String> = self.depends_on.iter().collect();
+        sink.write_tag(tag::LIST);
+        sink.write_u32_be(u32::try_from(sorted_deps.len()).expect("deps fit u32"));
+        for d in &sorted_deps {
+            sink.write_tagged_str(tag::STRING, d);
+        }
+        let sorted_sat: std::collections::BTreeSet<&String> = self.deps_satisfied.iter().collect();
+        sink.write_tag(tag::LIST);
+        sink.write_u32_be(u32::try_from(sorted_sat.len()).expect("satisfied fit u32"));
+        for d in &sorted_sat {
+            sink.write_tagged_str(tag::STRING, d);
+        }
+    }
+}
+
+impl galho_types::CanonicalBytes for DepGraph {
+    fn canonical_bytes(&self, sink: &mut galho_types::CanonicalSink) {
+        use galho_types::canonical::tag;
+        // DepGraph::new() already sorts snapshots by name; defense-in-depth here
+        // ensures the canonical stream is order-invariant even if a caller
+        // mutates the public snapshots field directly.
+        let mut snapshots: Vec<&GalhoStateSnapshot> = self.snapshots.iter().collect();
+        snapshots.sort_by(|a, b| a.name.cmp(&b.name));
+        sink.write_tag(tag::LIST);
+        sink.write_u32_be(u32::try_from(snapshots.len()).expect("snapshots fit u32"));
+        for s in &snapshots {
+            s.canonical_bytes(sink);
+        }
+    }
+}
+
 impl DepGraph {
     #[must_use]
     pub fn new(mut snapshots: Vec<GalhoStateSnapshot>) -> Self {
@@ -194,6 +235,26 @@ impl DepGraph {
     #[must_use]
     pub fn to_dot(&self) -> DotGraph<'_> {
         DotGraph(self)
+    }
+
+    /// Content-addressed signature of this graph — BLAKE3 over canonical bytes
+    /// (sorted snapshots, each with sorted deps + sorted satisfied). Two graphs
+    /// that compare equal modulo insertion order produce byte-identical hashes.
+    /// Operator pastes this into a PR description to prove "the carve stack at
+    /// review time was this exact shape" — cryptographically checkable.
+    ///
+    /// Determinism: proven by proptest (same input → same hash; shuffled-order
+    /// input → same hash). The substrate's typed audit story extends to the
+    /// operator's dep graph: hash a snapshot, attest later.
+    #[must_use]
+    pub fn content_hash(&self) -> galho_types::Blake3Hash {
+        galho_types::canonical::content_hash(self)
+    }
+
+    /// Hex-encoded content hash, suitable for CLI output / PR descriptions.
+    #[must_use]
+    pub fn content_hash_hex(&self) -> String {
+        self.content_hash().to_hex()
     }
 
     /// Render as a typed JSON object suitable for MCP / web / automation
