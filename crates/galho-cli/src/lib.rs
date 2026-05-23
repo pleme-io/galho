@@ -994,7 +994,7 @@ impl Runtime {
                 .put_object(&bytes)
                 .await
                 .with_context(|| format!("put context for galho '{name}'"))?;
-            let ref_name = format!("runtime/contexts/{name}");
+            let ref_name = RuntimeRef::context(name).to_string();
             // CAS against current value to make concurrent writers fail-loud.
             let current = backend.read_ref(&ref_name).await?;
             backend
@@ -1011,8 +1011,9 @@ impl Runtime {
                 .put_object(&bytes)
                 .await
                 .with_context(|| format!("put lock for root '{root}'"))?;
-            // Encode root in the ref path; refs accept '/' so use a sanitized form.
-            let ref_name = format!("runtime/locks/{}", root.replace('/', "_"));
+            // Encode root in the ref path via typed RuntimeRef builder — sanitizes
+            // '/' → '_' internally, no ad-hoc format!() needed.
+            let ref_name = RuntimeRef::lock(root).to_string();
             let current = backend.read_ref(&ref_name).await?;
             backend
                 .cas_ref(&ref_name, current.as_ref(), &hash)
@@ -1038,7 +1039,7 @@ impl Runtime {
         let mut locks: BTreeMap<String, galho_types::StackLock> = BTreeMap::new();
 
         for ref_path in store.list_refs().await? {
-            if let Some(name) = ref_path.strip_prefix("runtime/contexts/") {
+            if let Some(name) = ref_path.strip_prefix(RuntimeRef::context_prefix()) {
                 let Some(hash) = store.read_ref(&ref_path).await? else {
                     continue;
                 };
@@ -1050,7 +1051,7 @@ impl Runtime {
                 contexts.insert(name.to_string(), ctx);
                 continue;
             }
-            if let Some(root_sanitized) = ref_path.strip_prefix("runtime/locks/") {
+            if let Some(root_sanitized) = ref_path.strip_prefix(RuntimeRef::lock_prefix()) {
                 let Some(hash) = store.read_ref(&ref_path).await? else {
                     continue;
                 };
@@ -1076,6 +1077,66 @@ impl Runtime {
 
 fn summarize_sync(s: &SyncConfig) -> SyncSummary<'_> {
     SyncSummary(s)
+}
+
+/// Typed ref-name builder for Runtime persistence. The persistence layer uses
+/// two ref namespaces: `runtime/contexts/<galho>` for per-galho MorphismContext
+/// state, `runtime/locks/<root>` for per-stack-root locks. Adding a third
+/// namespace = adding a constructor here, NOT another ad-hoc `format!()`.
+///
+/// The `Display` impl is the typed render surface (★★ TYPED EMISSION surface
+/// 1); call sites consume it via `to_string()` or `{}` formatting against the
+/// ObjectStore's `&str` API.
+///
+/// Lock roots may contain `/` (the convention for SHA-prefixed branch refs);
+/// `Self::lock` sanitizes those into `_` to stay inside the ref-path alphabet.
+pub enum RuntimeRef<'a> {
+    Context(&'a str),
+    Lock(&'a str),
+}
+
+impl<'a> RuntimeRef<'a> {
+    #[must_use]
+    pub fn context(name: &'a str) -> Self {
+        Self::Context(name)
+    }
+
+    #[must_use]
+    pub fn lock(root: &'a str) -> Self {
+        Self::Lock(root)
+    }
+
+    /// Stripped name space prefix for parsing — symmetric with the `Display`
+    /// renderer; consumers use this to recognize a ref-path on restore.
+    #[must_use]
+    pub fn context_prefix() -> &'static str {
+        "runtime/contexts/"
+    }
+
+    #[must_use]
+    pub fn lock_prefix() -> &'static str {
+        "runtime/locks/"
+    }
+}
+
+impl std::fmt::Display for RuntimeRef<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Context(name) => write!(f, "{}{name}", Self::context_prefix()),
+            Self::Lock(root) => {
+                // Sanitize '/' → '_' so the ref stays inside the path alphabet.
+                f.write_str(Self::lock_prefix())?;
+                for ch in root.chars() {
+                    if ch == '/' {
+                        f.write_str("_")?;
+                    } else {
+                        write!(f, "{ch}")?;
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
 }
 
 /// Typed Display newtype for `SyncConfig` summaries. Replaces the previous

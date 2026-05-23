@@ -24,16 +24,18 @@ use std::path::{Path, PathBuf};
 /// monotonically decreasing — when this fails downward, lower the ceiling.
 ///
 /// History (most recent at top — each line is a ratchet step):
+///   2026-05-22  41  ratchet step: -2 (RuntimeRef typed builder in lib.rs)
+///                    + refinement: counter now skips comment lines (excludes
+///                                  docstring mentions of `format!()`)
 ///   2026-05-22  47  ratchet step: -3 (SyncSummary Display newtype in lib.rs:1077)
 ///   2026-05-22  50  ratchet step: -3 (TextMarker Display newtype in lib.rs:155)
 ///   2026-05-22  53  baseline at waiver registration
 ///
 /// Next refactor targets (in priority order):
-///   * `ref_name = format!("runtime/locks/{}", ...)` → typed `RefName` builder
 ///   * `with_context(|| format!(...))` × 12 → anyhow's `static_context` pattern
 ///   * `outcome_chain.rs` × 5 + `compliance_verifier.rs` × 6 → typed report renderers
 ///   * `translate.rs` × 8 (galho-terraform) → typed terraform-address renderer
-const CEILING: usize = 47;
+const CEILING: usize = 41;
 
 fn galho_workspace_root() -> PathBuf {
     // CARGO_MANIFEST_DIR is the package's Cargo.toml dir → walk up to workspace.
@@ -61,9 +63,26 @@ fn count_format_in_dir(dir: &Path) -> usize {
             total += count_format_in_dir(&path);
         } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
             if let Ok(content) = std::fs::read_to_string(&path) {
-                total += content.matches("format!").count();
+                total += count_format_in_source(&content);
             }
         }
+    }
+    total
+}
+
+/// Count actual `format!(` macro invocations in source. Skips lines that are
+/// entirely comments (start with `//` or `///` after whitespace) — comment
+/// mentions of `format!()` document the ban but don't violate it.
+fn count_format_in_source(content: &str) -> usize {
+    let mut total = 0;
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("//") {
+            continue;
+        }
+        // Count any `format!(` substring; the typed surface is `write!(`,
+        // `writeln!(`, or a Display impl — none collide with this pattern.
+        total += trimmed.matches("format!(").count();
     }
     total
 }
