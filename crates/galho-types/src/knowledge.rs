@@ -113,15 +113,34 @@ impl KnowledgeBase {
         // multi-destination morphisms like Abandon / RevertApply / Escalate).
         match transition_table()
             .iter()
-            .find(|t| t.from == ctx.current_phase && t.morphism == morphism)
+            .find(|t| t.from == ctx.current_phase() && t.morphism == morphism)
             .map(|t| t.to)
         {
             Some(target) => Ok(target),
             None => Err(vec![MorphismRequirement::MissingTransitionRow {
-                from: ctx.current_phase,
+                from: ctx.current_phase(),
                 morphism,
             }]),
         }
+    }
+
+    /// Advance a context's phase by applying `morphism`. This is the **only**
+    /// sanctioned mutation path for `MorphismContext::current_phase` outside
+    /// galho-types: it runs [`Self::apply_morphism`] (which checks the typed
+    /// preconditions), and on success writes the resulting phase via the
+    /// crate-private `set_phase`. The field being `pub(crate)` makes the
+    /// precondition-bypassing direct write impossible for external callers.
+    ///
+    /// Returns the new phase on success, or the unmet `MorphismRequirement`s
+    /// (leaving `ctx` unchanged) on failure.
+    pub fn advance(
+        &self,
+        morphism: MorphismId,
+        ctx: &mut crate::morphism::MorphismContext,
+    ) -> Result<Phase, Vec<MorphismRequirement>> {
+        let next = self.apply_morphism(morphism, ctx)?;
+        ctx.set_phase(next);
+        Ok(next)
     }
 
     /// Validate that the whole knowledge graph is well-formed:

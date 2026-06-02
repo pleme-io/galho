@@ -675,7 +675,7 @@ impl Runtime {
         let ctx = ctxs
             .get_mut(galho)
             .ok_or_else(|| anyhow!("galho '{galho}' not found"))?;
-        let current_phase = ctx.current_phase;
+        let current_phase = ctx.current_phase();
 
         let sync = self
             .kb
@@ -751,7 +751,7 @@ impl Runtime {
             let ctx = ctxs
                 .get(galho)
                 .ok_or_else(|| anyhow!("galho '{galho}' not found"))?;
-            ctx.current_phase
+            ctx.current_phase()
         };
 
         let sync = self
@@ -850,7 +850,7 @@ impl Runtime {
     fn propagate_dep_satisfaction(ctxs: &mut BTreeMap<String, MorphismContext>) {
         let snapshot: BTreeMap<String, Phase> = ctxs
             .iter()
-            .map(|(n, c)| (n.clone(), c.current_phase))
+            .map(|(n, c)| (n.clone(), c.current_phase()))
             .collect();
         for ctx in ctxs.values_mut() {
             ctx.deps_satisfied.clear();
@@ -919,12 +919,16 @@ impl Runtime {
             .get_mut(name)
             .ok_or_else(|| anyhow!("galho '{name}' not found; run `galho new` first"))?;
 
-        let next_phase = match self.kb.apply_morphism(morphism, ctx) {
+        let from_phase = ctx.current_phase();
+        // SEALED MUTATION: advance() runs the typed preconditions then writes the
+        // new phase via the crate-private set_phase. There is no precondition-
+        // bypassing direct write path anymore.
+        let next_phase = match self.kb.advance(morphism, ctx) {
             Ok(p) => p,
             Err(missing) => {
                 // Emit a MorphismBlocked event so the auditor can see attempted-but-blocked
                 // operator actions. Drop ctxs first so the observe() can take its own lock if needed.
-                let blocked_phase = ctx.current_phase;
+                let blocked_phase = from_phase;
                 let note = format!(
                     "missing: {}",
                     missing
@@ -952,8 +956,6 @@ impl Runtime {
             }
         };
 
-        let from_phase = ctx.current_phase;
-        ctx.current_phase = next_phase;
         Self::update_flags_post_morphism(ctx, morphism, next_phase, extra);
         // Recompute every galho's dep-satisfaction set so downstream galhos see the
         // phase change (e.g. galho-a → Verified unblocks galho-b's Promote).
@@ -1054,7 +1056,7 @@ impl Runtime {
             .get(name)
             .ok_or_else(|| anyhow!("galho '{name}' not found"))?;
 
-        let phase = ctx.current_phase;
+        let phase = ctx.current_phase();
         let forward = self.kb.forward_morphisms_from(phase);
         let backward = self.kb.backward_morphisms_from(phase);
         let sync_summary = self.kb.sync_for(phase).map(|s| summarize_sync(s).to_string());
@@ -1098,7 +1100,7 @@ impl Runtime {
             .iter()
             .map(|(name, ctx)| GalhoStateSnapshot {
                 name: name.clone(),
-                phase: ctx.current_phase,
+                phase: ctx.current_phase(),
                 depends_on: ctx.depends_on.iter().cloned().collect(),
                 deps_satisfied: ctx.deps_satisfied.iter().cloned().collect(),
             })

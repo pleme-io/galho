@@ -260,8 +260,7 @@ fn plan_morphism_succeeds_from_declared() {
 #[test]
 fn apply_to_preview_blocks_without_plan() {
     let kb = KnowledgeBase::default();
-    let mut ctx = MorphismContext::declared("galho-x");
-    ctx.current_phase = Phase::Planned;
+    let ctx = MorphismContext::at_phase("galho-x", Phase::Planned);
     // No plan, no stack lock.
     let result = kb.apply_morphism(MorphismId::ApplyToPreview, &ctx);
     let Err(missing) = result else {
@@ -274,8 +273,7 @@ fn apply_to_preview_blocks_without_plan() {
 #[test]
 fn apply_to_preview_succeeds_with_plan_and_lock() {
     let kb = KnowledgeBase::default();
-    let mut ctx = MorphismContext::declared("galho-x");
-    ctx.current_phase = Phase::Planned;
+    let mut ctx = MorphismContext::at_phase("galho-x", Phase::Planned);
     ctx.has_plan = true;
     ctx.stack_lock_held = true;
     let result = kb.apply_morphism(MorphismId::ApplyToPreview, &ctx);
@@ -285,8 +283,7 @@ fn apply_to_preview_succeeds_with_plan_and_lock() {
 #[test]
 fn promote_blocks_without_merge_event() {
     let kb = KnowledgeBase::default();
-    let mut ctx = MorphismContext::declared("galho-x");
-    ctx.current_phase = Phase::ApprovedAwaitingMerge;
+    let mut ctx = MorphismContext::at_phase("galho-x", Phase::ApprovedAwaitingMerge);
     ctx.has_apply_receipt = true;
     ctx.has_approval_quorum = true;
     // has_merge_event = false
@@ -302,8 +299,7 @@ fn promote_blocks_without_merge_event() {
 /// missing flag. Used to prove the destination phase always comes from the
 /// table row (never the morphism's nominal `to_phase()` fallback).
 fn fully_satisfied_at(phase: Phase) -> MorphismContext {
-    let mut ctx = MorphismContext::declared("galho-positive");
-    ctx.current_phase = phase;
+    let mut ctx = MorphismContext::at_phase("galho-positive", phase);
     ctx.has_plan = true;
     ctx.has_apply_receipt = true;
     ctx.has_approval_quorum = true;
@@ -347,10 +343,29 @@ fn apply_morphism_target_always_comes_from_transition_table() {
 }
 
 #[test]
+fn knowledge_advance_mutates_ctx_on_ok_and_leaves_unchanged_on_err() {
+    let kb = KnowledgeBase::default();
+
+    // Ok path: Declared --Plan--> Planned; ctx must be mutated to the table `to`.
+    let mut ctx = MorphismContext::declared("galho-advance");
+    assert_eq!(ctx.current_phase(), Phase::Declared);
+    let to = kb.advance(MorphismId::Plan, &mut ctx).unwrap();
+    assert_eq!(to, Phase::Planned);
+    assert_eq!(ctx.current_phase(), Phase::Planned);
+
+    // Err path: ApplyToPreview from Planned without plan/lock → preconditions unmet;
+    // ctx phase must be UNCHANGED.
+    let mut blocked = MorphismContext::at_phase("galho-blocked", Phase::Planned);
+    let before = blocked.current_phase();
+    let err = kb.advance(MorphismId::ApplyToPreview, &mut blocked);
+    assert!(err.is_err(), "expected preconditions to block the advance");
+    assert_eq!(blocked.current_phase(), before, "ctx must be unchanged on Err");
+}
+
+#[test]
 fn seal_done_requires_jira_resolvable() {
     let kb = KnowledgeBase::default();
-    let mut ctx = MorphismContext::declared("galho-x");
-    ctx.current_phase = Phase::Verified;
+    let mut ctx = MorphismContext::at_phase("galho-x", Phase::Verified);
     ctx.has_verify_receipt = true;
     ctx.jira_ticket_resolvable = false;
     let result = kb.apply_morphism(MorphismId::SealDone, &ctx);

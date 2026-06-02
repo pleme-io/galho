@@ -50,7 +50,13 @@ pub trait PhaseMorphism: Send + Sync + 'static {
 /// to + restore from an `ObjectStore` across process restarts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MorphismContext {
-    pub current_phase: Phase,
+    /// Sealed: the only legitimate mutation path is [`crate::KnowledgeBase::advance`]
+    /// (which runs the typed preconditions first). Read via [`MorphismContext::current_phase`].
+    /// Keeping the field `pub(crate)` makes the precondition-bypassing direct write
+    /// (`ctx.current_phase = …`) impossible outside this crate. The serde wire name is
+    /// preserved so checkpoints round-trip unchanged.
+    #[serde(rename = "current_phase")]
+    pub(crate) current_phase: Phase,
     pub galho_name: String,
     pub has_plan: bool,
     pub has_apply_receipt: bool,
@@ -108,6 +114,30 @@ impl MorphismContext {
     ) -> Self {
         let mut ctx = Self::declared(galho_name);
         ctx.depends_on = deps.into_iter().collect();
+        ctx
+    }
+
+    /// The current phase. The only read path now that the field is sealed.
+    #[must_use]
+    pub fn current_phase(&self) -> Phase {
+        self.current_phase
+    }
+
+    /// Set the current phase. `pub(crate)` so the ONLY external mutation path is
+    /// [`crate::KnowledgeBase::advance`], which runs preconditions first — direct
+    /// `ctx.current_phase = …` from outside the crate is impossible.
+    pub(crate) fn set_phase(&mut self, phase: Phase) {
+        self.current_phase = phase;
+    }
+
+    /// Test-fixture constructor: a `Declared`-shaped context placed at an arbitrary
+    /// phase. Needed by the external proptest crate (which can't write the
+    /// `pub(crate)` field directly). Production code advances via
+    /// [`crate::KnowledgeBase::advance`].
+    #[must_use]
+    pub fn at_phase(galho_name: impl Into<String>, phase: Phase) -> Self {
+        let mut ctx = Self::declared(galho_name);
+        ctx.current_phase = phase;
         ctx
     }
 
