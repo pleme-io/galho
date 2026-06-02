@@ -48,7 +48,7 @@ pub use conflict::{
 pub use error::GalhoError;
 pub use iac_system::{ApplySemantics, IaCSystem, IaCSystemId, StateLocation};
 pub use ir::{
-    AttrPath, DependencyEdge, DepKind, DriftKind, GraphRoot, Provenance, Resource,
+    AppliedStatus, AttrPath, DependencyEdge, DepKind, DriftKind, GraphRoot, Provenance, Resource,
     ResourceGraph, ResourceId, ResourceKind, ResourceStatus,
 };
 pub use merge::{MergeResult, StateMergeResult, merge_states, three_way_merge};

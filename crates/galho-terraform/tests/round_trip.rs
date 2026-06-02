@@ -109,6 +109,44 @@ fn canonical_to_tfstate_preserves_resource_count() {
 }
 
 #[test]
+fn translated_applied_status_carries_real_nonzero_hash() {
+    use galho_types::ResourceStatus;
+    let tf = sample_tfstate();
+    let graph = tfstate_to_canonical(&tf).unwrap();
+    for (rid, resource) in &graph.resources {
+        match &resource.status {
+            ResourceStatus::Applied(applied) => {
+                assert_ne!(
+                    applied.hash().0,
+                    [0u8; 32],
+                    "resource {rid:?} must carry a real (non-zero) Applied hash"
+                );
+                assert_eq!(applied.generation(), tf.serial);
+            }
+            other => panic!("expected Applied status for {rid:?}, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn translated_applied_hash_is_deterministic_across_runs() {
+    use galho_types::ResourceStatus;
+    let tf = sample_tfstate();
+    let g1 = tfstate_to_canonical(&tf).unwrap();
+    let g2 = tfstate_to_canonical(&tf).unwrap();
+    for (rid, r1) in &g1.resources {
+        let r2 = &g2.resources[rid];
+        if let (ResourceStatus::Applied(a1), ResourceStatus::Applied(a2)) =
+            (&r1.status, &r2.status)
+        {
+            // The content hash is derived from attrs (deterministic); the
+            // applied_at timestamp differs per run but does not affect the hash.
+            assert_eq!(a1.hash(), a2.hash(), "attr-derived hash must be stable for {rid:?}");
+        }
+    }
+}
+
+#[test]
 fn tfstate_json_round_trip_preserves_attributes() {
     let tf = sample_tfstate();
     let bytes = tf.to_json_bytes().unwrap();

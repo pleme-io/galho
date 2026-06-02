@@ -22,6 +22,13 @@ pub enum GalhoError {
     /// State-location parse error.
     #[error("invalid state location: {0}")]
     InvalidStateLocation(String),
+
+    /// An `Applied` resource status was constructed with an all-zeros BLAKE3
+    /// hash — the sentinel/forged value. A real apply always produces a non-zero
+    /// content hash; rejecting the zero hash makes the forged-status state
+    /// unrepresentable by construction.
+    #[error("Applied status hash is all-zeros (forged/sentinel); a real apply produces a non-zero BLAKE3 hash")]
+    ZeroAppliedHash,
 }
 
 /// Shared adapter error taxonomy. One enum across every IaCSystem adapter so galho-controller

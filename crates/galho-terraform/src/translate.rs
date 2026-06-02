@@ -9,8 +9,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use galho_types::{
-    AttrPath, DependencyEdge, DepKind, GraphRoot, Provenance, Resource, ResourceGraph,
-    ResourceId, ResourceKind, ResourceStatus, Value,
+    AppliedStatus, AttrPath, Blake3Hash, CanonicalBytes, CanonicalSink, DependencyEdge, DepKind,
+    GraphRoot, Provenance, Resource, ResourceGraph, ResourceId, ResourceKind, ResourceStatus,
+    Value,
 };
 use thiserror::Error;
 
@@ -60,16 +61,29 @@ pub fn tfstate_to_canonical(state: &Tfstate) -> Result<ResourceGraph, TranslateE
                     attr_path: None,
                 });
             }
+            // Deterministic, non-zero content hash over the resource's canonical
+            // attribute map (cross-run stable; same attrs → same hash). Replaces
+            // the previous forged all-zeros sentinel — AppliedStatus::new rejects
+            // the zero hash, so this MUST be a real digest.
+            let mut sink = CanonicalSink::new();
+            sink.write_sorted_map(
+                &attrs,
+                |s, k| k.canonical_bytes(s),
+                |s, v| v.canonical_bytes(s),
+            );
+            let content_hash = Blake3Hash::digest(sink.as_bytes());
+            let applied = AppliedStatus::new(
+                state.serial,
+                content_hash,
+                time::OffsetDateTime::now_utc(),
+            )
+            .map_err(|e| TranslateError::InvalidResource(id.to_string(), e.to_string()))?;
             let resource = Resource {
                 id: id.clone(),
                 kind: ResourceKind::new(r.kind.clone()),
                 attrs,
                 deps,
-                status: ResourceStatus::Applied {
-                    generation: state.serial,
-                    hash: galho_types::Blake3Hash::from([0u8; 32]),
-                    applied_at: time::OffsetDateTime::now_utc(),
-                },
+                status: ResourceStatus::Applied(applied),
                 provenance: Provenance {
                     imported: false,
                     authored_by: Some(format!("terraform:{}", state.terraform_version)),

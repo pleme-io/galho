@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use crate::canonical::{tag, CanonicalBytes, CanonicalSink};
+use crate::error::GalhoError;
 use crate::value::Value;
 use tameshi::hash::Blake3Hash;
 
@@ -80,12 +81,13 @@ impl AttrPath {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ResourceStatus {
-    Applied {
-        generation: u64,
-        hash: Blake3Hash,
-        #[serde(with = "time::serde::rfc3339")]
-        applied_at: OffsetDateTime,
-    },
+    /// A real apply landed. The payload is constructed only via
+    /// [`AppliedStatus::new`], which rejects the all-zeros (forged/sentinel)
+    /// hash — so a forged `Applied` status is unrepresentable. The internally-
+    /// tagged enum + plain-struct payload keeps the on-wire JSON byte-identical
+    /// to the previous struct-variant shape
+    /// (`{"kind":"applied","generation":…,"hash":…,"applied_at":…}`).
+    Applied(AppliedStatus),
     Pending,
     Failed {
         reason: String,
@@ -102,6 +104,58 @@ pub enum ResourceStatus {
         #[serde(with = "time::serde::rfc3339")]
         destroyed_at: OffsetDateTime,
     },
+}
+
+/// The payload of [`ResourceStatus::Applied`]. Fields are private; the only
+/// constructor is [`AppliedStatus::new`], which rejects an all-zeros BLAKE3
+/// hash. A real apply always produces a non-zero content hash, so the
+/// forged/sentinel status is unrepresentable by construction — the same
+/// discipline as `cofre`'s SecretRef and ishou's `Refined<T,B>`.
+///
+/// `Deserialize` is derived (operators restore persisted state), but the
+/// smart-ctor invariant is the construction-side guard; on-disk bytes that
+/// somehow carry a zero hash would round-trip — that case is closed at the
+/// translate.rs producer where the value is born.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AppliedStatus {
+    generation: u64,
+    hash: Blake3Hash,
+    #[serde(with = "time::serde::rfc3339")]
+    applied_at: OffsetDateTime,
+}
+
+impl AppliedStatus {
+    /// Construct an `Applied` status. Rejects the all-zeros BLAKE3 hash
+    /// (the forged/sentinel value) with [`GalhoError::ZeroAppliedHash`].
+    pub fn new(
+        generation: u64,
+        hash: Blake3Hash,
+        applied_at: OffsetDateTime,
+    ) -> Result<Self, GalhoError> {
+        if hash.0 == [0u8; 32] {
+            return Err(GalhoError::ZeroAppliedHash);
+        }
+        Ok(Self {
+            generation,
+            hash,
+            applied_at,
+        })
+    }
+
+    #[must_use]
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    #[must_use]
+    pub fn hash(&self) -> &Blake3Hash {
+        &self.hash
+    }
+
+    #[must_use]
+    pub fn applied_at(&self) -> OffsetDateTime {
+        self.applied_at
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -234,15 +288,11 @@ impl CanonicalBytes for Resource {
         // fields. Timestamps participate (the moment of apply is part of identity per
         // §II.7). Float status fields would canonicalize if present.
         match &self.status {
-            ResourceStatus::Applied {
-                generation,
-                hash,
-                applied_at,
-            } => {
+            ResourceStatus::Applied(applied) => {
                 sink.write_u8(0x01);
-                sink.write_raw(&generation.to_be_bytes());
-                sink.write_len_prefixed(hash.0.as_slice());
-                sink.write_tagged_str(tag::STRING, &applied_at.to_string());
+                sink.write_raw(&applied.generation().to_be_bytes());
+                sink.write_len_prefixed(applied.hash().0.as_slice());
+                sink.write_tagged_str(tag::STRING, &applied.applied_at().to_string());
             }
             ResourceStatus::Pending => sink.write_u8(0x02),
             ResourceStatus::Failed {
