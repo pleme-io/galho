@@ -108,12 +108,20 @@ impl KnowledgeBase {
             return Err(missing);
         }
         // Find the (from=current, morphism=this) transition in the static table.
-        let target = transition_table()
+        // A missing row is a typed hard error — never silently substitute the
+        // morphism's nominal `to_phase()` (which masks wrong-target bugs for
+        // multi-destination morphisms like Abandon / RevertApply / Escalate).
+        match transition_table()
             .iter()
             .find(|t| t.from == ctx.current_phase && t.morphism == morphism)
             .map(|t| t.to)
-            .unwrap_or_else(|| m.to_phase());
-        Ok(target)
+        {
+            Some(target) => Ok(target),
+            None => Err(vec![MorphismRequirement::MissingTransitionRow {
+                from: ctx.current_phase,
+                morphism,
+            }]),
+        }
     }
 
     /// Validate that the whole knowledge graph is well-formed:

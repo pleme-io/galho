@@ -158,6 +158,12 @@ pub enum MorphismRequirement {
     /// One or more galhos this galho depends on have not yet reached a "done-enough"
     /// phase (Verified / Done). Enforces stacked-PR dependency ordering.
     DependencyNotMet { unmet: Vec<String> },
+    /// No `(from, morphism)` row exists in the static transition table — the
+    /// preconditions passed but the FSM has no declared destination for this
+    /// move. Surfaced as a hard typed error instead of silently substituting
+    /// the morphism's nominal `to_phase()` (which masks wrong-target bugs for
+    /// multi-destination morphisms like Abandon / RevertApply / Escalate).
+    MissingTransitionRow { from: Phase, morphism: MorphismId },
 }
 
 // ===== Concrete forward morphisms =====

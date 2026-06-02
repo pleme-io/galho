@@ -290,6 +290,55 @@ fn promote_blocks_without_merge_event() {
     assert!(missing.contains(&MorphismRequirement::MergeEventMissing));
 }
 
+/// A `MorphismContext` at `phase` with every boolean precondition satisfied —
+/// so `apply_morphism` is gated only by the transition-table lookup, not by a
+/// missing flag. Used to prove the destination phase always comes from the
+/// table row (never the morphism's nominal `to_phase()` fallback).
+fn fully_satisfied_at(phase: Phase) -> MorphismContext {
+    let mut ctx = MorphismContext::declared("galho-positive");
+    ctx.current_phase = phase;
+    ctx.has_plan = true;
+    ctx.has_apply_receipt = true;
+    ctx.has_approval_quorum = true;
+    ctx.has_merge_event = true;
+    ctx.has_verify_receipt = true;
+    ctx.stack_lock_held = true;
+    ctx.jira_ticket_resolvable = true;
+    // No drift / conflict / deps to block.
+    ctx.drift_detected = false;
+    ctx.conflict_open = false;
+    ctx
+}
+
+#[test]
+fn apply_morphism_target_always_comes_from_transition_table() {
+    // For every (from, morphism, to) row in the table, a fully-satisfied context
+    // at `from` firing `morphism` must return EXACTLY the table's `to` — never the
+    // morphism's nominal `to_phase()`. This is the regression guard for the old
+    // `.unwrap_or_else(|| m.to_phase())` fallback that masked the Abandon-from-
+    // ApprovedAwaitingMerge wrong-target bug.
+    let kb = KnowledgeBase::default();
+    for row in transition_table() {
+        let ctx = fully_satisfied_at(row.from);
+        // DriftReconcile is bidirectional (Verified ↔ Drifted): from Verified the
+        // morphism's precondition path may pick the detection direction. Skip rows
+        // whose preconditions a fully-satisfied flag-set can't represent cleanly;
+        // assert only that, IF it returns Ok, the target equals the table row.
+        match kb.apply_morphism(row.morphism, &ctx) {
+            Ok(target) => assert_eq!(
+                target, row.to,
+                "morphism {:?} from {:?}: table says {:?}, got {:?}",
+                row.morphism, row.from, row.to, target
+            ),
+            Err(_) => {
+                // Some rows (e.g. DriftReconcile detection direction) require a
+                // specific flag combination the blanket-satisfied context doesn't
+                // hit; those are covered by the dedicated unit tests above.
+            }
+        }
+    }
+}
+
 #[test]
 fn seal_done_requires_jira_resolvable() {
     let kb = KnowledgeBase::default();
