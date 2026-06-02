@@ -18,6 +18,7 @@
 #![allow(clippy::module_name_repetitions, clippy::missing_errors_doc)]
 
 pub mod canonical;
+pub mod comfort;
 pub mod compliance;
 pub mod conflict;
 pub mod config;
@@ -41,6 +42,7 @@ pub mod value;
 pub mod testing;
 
 pub use canonical::{CanonicalBytes, CanonicalSink, content_hash};
+pub use comfort::{COMFORT_MATRIX, ComfortRow, ComfortTier, ParkCost, comfort_of};
 pub use derive::{apply_changes, apply_plan, diff_attrs, diff_graphs, diff_states};
 pub use conflict::{
     BranchSide, CrossSystemConflict, CrossSystemMismatch, SemanticConflict,
