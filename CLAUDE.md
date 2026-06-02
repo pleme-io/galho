@@ -37,16 +37,16 @@ crates/
 ## Build / Test
 
 ```bash
-nix build .#galho-types
-nix build .#galho-storage
+nix build .#galho
+nix run   .#galho
 cargo build --workspace
-cargo test  --workspace            # 36 tests pass across both crates
+cargo test  --workspace            # tests pass across all crates
 ```
 
 ## Conventions
 
 - Rust edition 2024, MIT license (workspace defaults).
-- substrate's `rust-library-workspace-flake.nix` for the flake.
+- substrate's `rust-workspace-release-flake.nix` for the flake (`nix run .#galho` → `galho-cli`).
 - caixa-native: `caixa.lisp` declares Biblioteca kind.
 - Consumes tameshi via path dep during in-tree development; release workflow swaps to git dep before publish.
 - Property-based testing via `proptest`. 36 passing tests covering the load-bearing canonicalization and merge invariants.
