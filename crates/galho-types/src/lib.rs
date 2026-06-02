@@ -34,6 +34,7 @@ pub mod plan;
 pub mod state;
 pub mod stack_lock;
 pub mod sync;
+pub mod typestate;
 pub mod value;
 
 #[cfg(feature = "testing")]
@@ -68,6 +69,7 @@ pub use phase::{
     is_known_transition, transition_table, transitions_from, transitions_to, MorphismId, Phase,
     PhaseClass, PhaseTransition,
 };
+pub use typestate::{Galho, PhaseState};
 pub use compliance::{
     ComplianceBaseline, ComplianceReport, ComplianceRule, ComplianceStatus, ComplianceViolation,
 };
