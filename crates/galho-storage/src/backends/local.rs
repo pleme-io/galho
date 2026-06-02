@@ -20,7 +20,7 @@ use galho_types::Blake3Hash;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 
-use crate::object_store::{ObjectStore, StoreError};
+use crate::object_store::{Addressed, ObjectStore, StoreError};
 
 #[derive(Debug)]
 pub struct LocalFsBackend {
@@ -74,11 +74,11 @@ impl LocalFsBackend {
 
 #[async_trait]
 impl ObjectStore for LocalFsBackend {
-    async fn put_object(&self, bytes: &[u8]) -> Result<Blake3Hash, StoreError> {
+    async fn put_object(&self, bytes: &[u8]) -> Result<Addressed, StoreError> {
         let hash = Blake3Hash::digest(bytes);
         let path = self.object_path(&hash);
         Self::write_atomic(&path, bytes, true).await?;
-        Ok(hash)
+        Ok(Addressed::new(hash, bytes.to_vec()))
     }
 
     async fn get_object(&self, hash: &Blake3Hash) -> Result<Option<Vec<u8>>, StoreError> {
@@ -202,6 +202,57 @@ impl ObjectStore for LocalFsBackend {
         let hex = format!("{}\n", new.to_hex());
         fs::write(&tmp, hex.as_bytes()).await?;
         fs::rename(&tmp, &path).await?;
+        let _ = fs::remove_file(&lock).await;
+        Ok(())
+    }
+
+    /// CAS-delete via the same lockfile dance as `cas_ref`: acquire the O_EXCL
+    /// lock, verify the current value equals `expected`, then remove the ref.
+    async fn cas_delete_ref(
+        &self,
+        name: &str,
+        expected: Option<&Blake3Hash>,
+    ) -> Result<(), StoreError> {
+        let path = self.ref_path(name);
+        Self::ensure_parent(&path).await?;
+        let lock = path.with_extension("lock");
+
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lock)
+            .await
+        {
+            Ok(f) => drop(f),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // Build the contention message WITHOUT format!() (typed-emission ratchet).
+                let mut msg = String::from("ref '");
+                msg.push_str(name);
+                msg.push_str("' is currently locked");
+                return Err(StoreError::Backend(msg));
+            }
+            Err(e) => return Err(StoreError::Io(e)),
+        }
+
+        let current = self.read_ref(name).await?;
+        if current.as_ref() != expected {
+            let _ = fs::remove_file(&lock).await;
+            return Err(StoreError::DeleteCasFailed {
+                ref_name: name.into(),
+                expected: expected.cloned(),
+                current,
+            });
+        }
+
+        // Remove the ref (no-op if already absent — the expected==None+absent case).
+        match fs::remove_file(&path).await {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                let _ = fs::remove_file(&lock).await;
+                return Err(StoreError::Io(e));
+            }
+        }
         let _ = fs::remove_file(&lock).await;
         Ok(())
     }

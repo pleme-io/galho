@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use galho_types::Blake3Hash;
 use tokio::sync::RwLock;
 
-use crate::object_store::{ObjectStore, StoreError};
+use crate::object_store::{Addressed, ObjectStore, StoreError};
 
 #[derive(Debug, Default)]
 struct Inner {
@@ -31,13 +31,13 @@ impl MemoryBackend {
 
 #[async_trait]
 impl ObjectStore for MemoryBackend {
-    async fn put_object(&self, bytes: &[u8]) -> Result<Blake3Hash, StoreError> {
+    async fn put_object(&self, bytes: &[u8]) -> Result<Addressed, StoreError> {
         let hash = Blake3Hash::digest(bytes);
         let mut g = self.inner.write().await;
         g.objects
             .entry(hash.clone())
             .or_insert_with(|| bytes.to_vec());
-        Ok(hash)
+        Ok(Addressed::new(hash, bytes.to_vec()))
     }
 
     async fn get_object(&self, hash: &Blake3Hash) -> Result<Option<Vec<u8>>, StoreError> {
@@ -99,6 +99,24 @@ impl ObjectStore for MemoryBackend {
             });
         }
         g.refs.insert(name.into(), new.clone());
+        Ok(())
+    }
+
+    async fn cas_delete_ref(
+        &self,
+        name: &str,
+        expected: Option<&Blake3Hash>,
+    ) -> Result<(), StoreError> {
+        let mut g = self.inner.write().await;
+        let current = g.refs.get(name).cloned();
+        if current.as_ref() != expected {
+            return Err(StoreError::DeleteCasFailed {
+                ref_name: name.into(),
+                expected: expected.cloned(),
+                current,
+            });
+        }
+        g.refs.remove(name);
         Ok(())
     }
 

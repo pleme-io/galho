@@ -27,8 +27,10 @@ pub mod object_store;
 pub mod outcome_chain;
 
 pub use compliance_verifier::{verify, verify_regime};
-pub use galho_tree::{GalhoTree, GcReport, NodeMeta, META_KIND_NODE};
-pub use object_store::{ObjectStore, StoreError, put_typed};
+pub use galho_tree::{
+    AdvanceOutcome, Divergence, GalhoTree, GcReport, NodeMeta, META_KIND_NODE,
+};
+pub use object_store::{Addressed, ObjectStore, StoreError, put_typed};
 pub use outcome_chain::{
     compute_entry_hash, ChainedOutcomeEmitter, ChainedOutcomeEntry, OutcomeChain,
     META_KIND_OUTCOME_INDEX, REF_OUTCOME_HEAD,

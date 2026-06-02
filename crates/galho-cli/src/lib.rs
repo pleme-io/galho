@@ -1129,7 +1129,8 @@ impl Runtime {
             let hash = backend
                 .put_object(&bytes)
                 .await
-                .with_context(|| format!("put context for galho '{name}'"))?;
+                .with_context(|| format!("put context for galho '{name}'"))?
+                .into_hash();
             let ref_name = RuntimeRef::context(name).to_string();
             // CAS against current value to make concurrent writers fail-loud.
             let current = backend.read_ref(&ref_name).await?;
@@ -1146,7 +1147,8 @@ impl Runtime {
             let hash = backend
                 .put_object(&bytes)
                 .await
-                .with_context(|| format!("put lock for root '{root}'"))?;
+                .with_context(|| format!("put lock for root '{root}'"))?
+                .into_hash();
             // Encode root in the ref path via typed RuntimeRef builder — sanitizes
             // '/' → '_' internally, no ad-hoc format!() needed.
             let ref_name = RuntimeRef::lock(root).to_string();

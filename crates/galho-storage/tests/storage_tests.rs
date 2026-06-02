@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use galho_storage::{
     backends::{LocalFsBackend, MemoryBackend},
-    GalhoTree, NodeMeta, ObjectStore, StoreError,
+    AdvanceOutcome, GalhoTree, NodeMeta, ObjectStore, StoreError,
 };
 use galho_types::Blake3Hash;
 use proptest::prelude::*;
@@ -50,7 +50,7 @@ proptest! {
         let rt = rt();
         rt.block_on(async {
             let store = MemoryBackend::new();
-            let hash = store.put_object(&bytes).await.unwrap();
+            let hash = store.put_object(&bytes).await.unwrap().into_hash();
             prop_assert_eq!(hash.clone(), Blake3Hash::digest(&bytes));
             let got = store.get_object(&hash).await.unwrap();
             prop_assert_eq!(got, Some(bytes));
@@ -65,8 +65,8 @@ proptest! {
         let rt = rt();
         rt.block_on(async {
             let store = MemoryBackend::new();
-            let h1 = store.put_object(&bytes).await.unwrap();
-            let h2 = store.put_object(&bytes).await.unwrap();
+            let h1 = store.put_object(&bytes).await.unwrap().into_hash();
+            let h2 = store.put_object(&bytes).await.unwrap().into_hash();
             prop_assert_eq!(h1.clone(), h2);
             let list = store.list_objects().await.unwrap();
             prop_assert_eq!(list.len(), 1);
@@ -81,12 +81,12 @@ proptest! {
         let rt = rt();
         rt.block_on(async {
             let store = MemoryBackend::new();
-            let h = store.put_object(&bytes).await.unwrap();
+            let h = store.put_object(&bytes).await.unwrap().into_hash();
             // First cas: must succeed.
             store.cas_ref("galhos/test", None, &h).await.unwrap();
             // Second cas with wrong expected: must fail.
             let other_bytes = vec![0xff];
-            let h_other = store.put_object(&other_bytes).await.unwrap();
+            let h_other = store.put_object(&other_bytes).await.unwrap().into_hash();
             let err = store.cas_ref("galhos/test", None, &h_other).await;
             let is_cas_failed = matches!(err, Err(StoreError::CasFailed { .. }));
             prop_assert!(is_cas_failed);
@@ -111,7 +111,7 @@ fn local_fs_put_get_roundtrip() {
     let rt = rt();
     rt.block_on(async {
         let bytes = b"hello galho".to_vec();
-        let hash = store.put_object(&bytes).await.unwrap();
+        let hash = store.put_object(&bytes).await.unwrap().into_hash();
         assert_eq!(hash, Blake3Hash::digest(&bytes));
         let got = store.get_object(&hash).await.unwrap();
         assert_eq!(got, Some(bytes));
@@ -125,8 +125,8 @@ fn local_fs_idempotent_put() {
     let rt = rt();
     rt.block_on(async {
         let bytes = b"galho stable".to_vec();
-        let h1 = store.put_object(&bytes).await.unwrap();
-        let h2 = store.put_object(&bytes).await.unwrap();
+        let h1 = store.put_object(&bytes).await.unwrap().into_hash();
+        let h2 = store.put_object(&bytes).await.unwrap().into_hash();
         assert_eq!(h1, h2);
         let list = store.list_objects().await.unwrap();
         assert_eq!(list.len(), 1);
@@ -139,8 +139,8 @@ fn local_fs_cas_semantics() {
     let store = LocalFsBackend::new(dir.path());
     let rt = rt();
     rt.block_on(async {
-        let h1 = store.put_object(b"v1").await.unwrap();
-        let h2 = store.put_object(b"v2").await.unwrap();
+        let h1 = store.put_object(b"v1").await.unwrap().into_hash();
+        let h2 = store.put_object(b"v2").await.unwrap().into_hash();
         // Initial cas with None: succeeds.
         store
             .cas_ref("galhos/main", None, &h1)
@@ -167,7 +167,7 @@ fn local_fs_list_refs_recursive() {
     let store = LocalFsBackend::new(dir.path());
     let rt = rt();
     rt.block_on(async {
-        let h = store.put_object(b"x").await.unwrap();
+        let h = store.put_object(b"x").await.unwrap().into_hash();
         store.cas_ref("galhos/main", None, &h).await.unwrap();
         store
             .cas_ref("galhos/feat/foo", None, &h)
@@ -256,7 +256,11 @@ fn galho_tree_gc_preserves_reachable_deletes_orphans() {
             .unwrap();
 
         // Advance "main" head to child. No head for "never-pointed-to" galho.
-        tree.advance_head("main", None, &child_hash).await.unwrap();
+        let outcome = tree
+            .advance_ref("main", None, &child_hash, &child_meta("main", vec![root_hash.clone()]))
+            .await
+            .unwrap();
+        assert!(matches!(outcome, AdvanceOutcome::Advanced));
 
         // GC: orphan should disappear; root + child retained.
         let report = tree.gc().await.unwrap();
@@ -270,7 +274,7 @@ fn galho_tree_gc_preserves_reachable_deletes_orphans() {
 }
 
 #[test]
-fn galho_tree_advance_head_cas_semantics() {
+fn galho_tree_advance_ref_lineage_semantics() {
     let rt = rt();
     rt.block_on(async {
         let store = Arc::new(MemoryBackend::new());
@@ -280,22 +284,57 @@ fn galho_tree_advance_head_cas_semantics() {
             .insert_node(b"s1".as_slice(), &empty_meta("main"))
             .await
             .unwrap();
+        let h2_meta = child_meta("main", vec![h1.clone()]);
         let h2 = tree
-            .insert_node(b"s2".as_slice(), &child_meta("main", vec![h1.clone()]))
+            .insert_node(b"s2".as_slice(), &h2_meta)
             .await
             .unwrap();
 
-        // First advance: expected=None.
-        tree.advance_head("main", None, &h1).await.unwrap();
-        // Stale expected → CAS fails.
+        // First advance: expected_tip=None (fresh head) → Advanced.
+        let o1 = tree
+            .advance_ref("main", None, &h1, &empty_meta("main"))
+            .await
+            .unwrap();
+        assert!(matches!(o1, AdvanceOutcome::Advanced));
+
+        // A sibling node whose parent_hashes does NOT include the current head h1
+        // → Diverged (lineage check), head unchanged.
+        let sibling_meta = empty_meta("main"); // no parents → does not descend from h1
+        let sibling = tree
+            .insert_node(b"sibling".as_slice(), &sibling_meta)
+            .await
+            .unwrap();
+        let diverged = tree
+            .advance_ref("main", Some(&h1), &sibling, &sibling_meta)
+            .await
+            .unwrap();
+        assert!(matches!(diverged, AdvanceOutcome::Diverged(_)));
+        assert_eq!(tree.head("main").await.unwrap(), Some(h1.clone()));
+
+        // h2 descends from h1 → Advanced.
+        let o2 = tree
+            .advance_ref("main", Some(&h1), &h2, &h2_meta)
+            .await
+            .unwrap();
+        assert!(matches!(o2, AdvanceOutcome::Advanced));
+        assert_eq!(tree.head("main").await.unwrap(), Some(h2));
+    });
+}
+
+#[test]
+fn raw_cas_ref_still_fails_loud_on_stale_expected() {
+    // Cover the underlying CAS primitive directly: a stale `expected` must
+    // produce StoreError::CasFailed regardless of the lineage layer above it.
+    let rt = rt();
+    rt.block_on(async {
+        let store = MemoryBackend::new();
+        let h1 = store.put_object(b"v1").await.unwrap().into_hash();
+        let h2 = store.put_object(b"v2").await.unwrap().into_hash();
+        store.cas_ref("galhos/raw", None, &h1).await.unwrap();
         assert!(matches!(
-            tree.advance_head("main", None, &h2).await,
+            store.cas_ref("galhos/raw", None, &h2).await,
             Err(StoreError::CasFailed { .. })
         ));
-        // Fresh expected → CAS succeeds.
-        tree.advance_head("main", Some(&h1), &h2).await.unwrap();
-        let head = tree.head("main").await.unwrap();
-        assert_eq!(head, Some(h2));
     });
 }
 
@@ -310,8 +349,18 @@ fn galho_tree_list_galhos() {
             .insert_node(b"x".as_slice(), &empty_meta("main"))
             .await
             .unwrap();
-        tree.advance_head("main", None, &h).await.unwrap();
-        tree.advance_head("feature/auth", None, &h).await.unwrap();
+        assert!(matches!(
+            tree.advance_ref("main", None, &h, &empty_meta("main"))
+                .await
+                .unwrap(),
+            AdvanceOutcome::Advanced
+        ));
+        assert!(matches!(
+            tree.advance_ref("feature/auth", None, &h, &empty_meta("feature/auth"))
+                .await
+                .unwrap(),
+            AdvanceOutcome::Advanced
+        ));
 
         let mut names = tree.list_galhos().await.unwrap();
         names.sort();
@@ -335,7 +384,12 @@ fn galho_tree_gc_cycle_safe() {
             .insert_node(b"loopy".as_slice(), &empty_meta("main"))
             .await
             .unwrap();
-        tree.advance_head("main", None, &h).await.unwrap();
+        assert!(matches!(
+            tree.advance_ref("main", None, &h, &empty_meta("main"))
+                .await
+                .unwrap(),
+            AdvanceOutcome::Advanced
+        ));
 
         let bad_meta = child_meta("main", vec![h.clone()]);
         let bad_meta_bytes = serde_json::to_vec(&bad_meta).unwrap();
@@ -347,5 +401,119 @@ fn galho_tree_gc_cycle_safe() {
         // Traversal must terminate.
         let reach = tree.reachable_from(&h).await.unwrap();
         assert_eq!(reach.len(), 1);
+    });
+}
+
+// =============================================================================
+// Inc 8: Addressed witness, discharge_divergence, cas_delete_ref
+// =============================================================================
+
+#[test]
+fn addressed_hash_matches_digest_of_bytes() {
+    let rt = rt();
+    rt.block_on(async {
+        let store = MemoryBackend::new();
+        let bytes = b"witness-me".to_vec();
+        let addr = store.put_object(&bytes).await.unwrap();
+        assert_eq!(addr.hash(), &Blake3Hash::digest(&bytes));
+        assert_eq!(addr.bytes(), bytes.as_slice());
+        assert_eq!(addr.into_hash(), Blake3Hash::digest(&bytes));
+    });
+}
+
+#[test]
+fn discharge_divergence_ok_with_both_parent_merge_and_err_on_missing_parent() {
+    let rt = rt();
+    rt.block_on(async {
+        let store = Arc::new(MemoryBackend::new());
+        let tree = GalhoTree::new(store.clone());
+
+        // Build a real divergence: head=h1, sibling does not descend from h1.
+        let h1 = tree.insert_node(b"a".as_slice(), &empty_meta("main")).await.unwrap();
+        assert!(matches!(
+            tree.advance_ref("main", None, &h1, &empty_meta("main")).await.unwrap(),
+            AdvanceOutcome::Advanced
+        ));
+        let sib_meta = empty_meta("main");
+        let sib = tree.insert_node(b"b".as_slice(), &sib_meta).await.unwrap();
+        let AdvanceOutcome::Diverged(div) = tree
+            .advance_ref("main", Some(&h1), &sib, &sib_meta)
+            .await
+            .unwrap()
+        else {
+            panic!("expected divergence");
+        };
+
+        // A merge node missing one parent → Err(Backend).
+        let bad_merge_meta = child_meta("main", vec![h1.clone()]); // only one parent
+        let bad_merge = tree
+            .insert_node(b"bad-merge".as_slice(), &bad_merge_meta)
+            .await
+            .unwrap();
+        assert!(matches!(
+            tree.discharge_divergence(div.clone(), &bad_merge, &bad_merge_meta).await,
+            Err(StoreError::Backend(_))
+        ));
+        // Head unchanged after the rejected merge.
+        assert_eq!(tree.head("main").await.unwrap(), Some(h1.clone()));
+
+        // A merge node descending from BOTH tips → Ok, head advances.
+        let good_merge_meta = child_meta("main", vec![h1.clone(), sib.clone()]);
+        let good_merge = tree
+            .insert_node(b"good-merge".as_slice(), &good_merge_meta)
+            .await
+            .unwrap();
+        tree.discharge_divergence(div, &good_merge, &good_merge_meta)
+            .await
+            .unwrap();
+        assert_eq!(tree.head("main").await.unwrap(), Some(good_merge));
+    });
+}
+
+#[test]
+fn cas_delete_ref_match_mismatch_and_absent_semantics() {
+    let rt = rt();
+    rt.block_on(async {
+        let store = MemoryBackend::new();
+        let h = store.put_object(b"v").await.unwrap().into_hash();
+        let other = store.put_object(b"w").await.unwrap().into_hash();
+
+        // No-op success: expected=None on an absent ref.
+        store.cas_delete_ref("galhos/absent", None).await.unwrap();
+
+        // Set a ref, then delete-CAS with the WRONG expected → DeleteCasFailed.
+        store.cas_ref("galhos/x", None, &h).await.unwrap();
+        assert!(matches!(
+            store.cas_delete_ref("galhos/x", Some(&other)).await,
+            Err(StoreError::DeleteCasFailed { .. })
+        ));
+        // Ref still present.
+        assert_eq!(store.read_ref("galhos/x").await.unwrap(), Some(h.clone()));
+
+        // Delete-CAS with the matching expected → deletes.
+        store.cas_delete_ref("galhos/x", Some(&h)).await.unwrap();
+        assert_eq!(store.read_ref("galhos/x").await.unwrap(), None);
+    });
+}
+
+#[test]
+fn local_fs_cas_delete_ref_semantics() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = LocalFsBackend::new(dir.path());
+    let rt = rt();
+    rt.block_on(async {
+        let h = store.put_object(b"v1").await.unwrap().into_hash();
+        let other = store.put_object(b"v2").await.unwrap().into_hash();
+        store.cas_ref("galhos/d", None, &h).await.unwrap();
+        // Mismatch → DeleteCasFailed.
+        assert!(matches!(
+            store.cas_delete_ref("galhos/d", Some(&other)).await,
+            Err(StoreError::DeleteCasFailed { .. })
+        ));
+        // Match → deleted.
+        store.cas_delete_ref("galhos/d", Some(&h)).await.unwrap();
+        assert_eq!(store.read_ref("galhos/d").await.unwrap(), None);
+        // No-op success on absent ref.
+        store.cas_delete_ref("galhos/never", None).await.unwrap();
     });
 }

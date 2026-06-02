@@ -160,12 +160,13 @@ impl<S: ObjectStore> OutcomeChain<S> {
             .map_err(|e| StoreError::Decode(format!("entry encode: {e}")))?;
         // Persist under content hash. The store's hash MUST equal entry.entry_hash()
         // because the store hashes the same bytes we just serialized.
-        let stored_hash = self.store.put_object(&bytes).await?;
+        let stored = self.store.put_object(&bytes).await?;
         debug_assert_eq!(
-            stored_hash,
-            entry.entry_hash(),
+            stored.hash(),
+            &entry.entry_hash(),
             "store content-hash must match chain entry-hash"
         );
+        let stored_hash = stored.into_hash();
 
         // Persist the sequence-index entry so `entry_at(sequence)` walks O(N) once
         // (acceptable for v0.1; a dedicated sequence backend trait lands at M5).
