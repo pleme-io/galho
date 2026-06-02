@@ -11,7 +11,7 @@
 
 use std::path::PathBuf;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand};
 use galho_cli::Runtime;
 use galho_types::MorphismId;
@@ -106,6 +106,17 @@ enum Command {
     /// deps, unmet deps, current phase. Operator UX for "why is this galho's Promote
     /// still blocked?"
     Deps,
+
+    /// Deploy-order gate — sibling of `carve gate` (PR merge-order) at the IaC
+    /// layer. Exits non-zero when an upstream dependency of `--galho` has not
+    /// reached `Verified`/`Done` (and, under `--require-siblings-ready`, when a
+    /// sibling galho is still `Declared`). A `Failed` self with deps met passes.
+    Gate {
+        /// Also block when a sibling galho (one sharing a declared dep) is still
+        /// in the `Declared` phase.
+        #[arg(long)]
+        require_siblings_ready: bool,
+    },
 
     /// Render the dependency graph as Mermaid or DOT syntax. Operator pastes the
     /// Mermaid output directly into a GitHub PR description (GitHub renders Mermaid
@@ -260,6 +271,9 @@ async fn main() -> Result<()> {
         }
         Command::Deps => {
             print_dep_graph(&rt, &cli.output).await?;
+        }
+        Command::Gate { require_siblings_ready } => {
+            run_gate(&rt, cli.galho.clone(), require_siblings_ready, &cli.output).await?;
         }
         Command::Graph { format, hash } => {
             print_graph_typed(&rt, format, hash, &cli.output).await?;
@@ -519,6 +533,63 @@ async fn print_dep_graph(rt: &Runtime, output: &OutputFormat) -> Result<()> {
         if !unmet.is_empty() {
             println!("    unmet: {}", unmet.join(", "));
         }
+    }
+    Ok(())
+}
+
+/// Deploy-order gate. Resolves the named galho, computes which of its declared
+/// deps are not yet `Verified`/`Done`, and — under `require_siblings_ready` —
+/// which sibling galhos (those sharing one of its declared deps) are still
+/// `Declared`. Prints a typed `GateReport` and exits non-zero if blocked.
+async fn run_gate(
+    rt: &Runtime,
+    galho: Option<String>,
+    require_siblings_ready: bool,
+    output: &OutputFormat,
+) -> Result<()> {
+    use galho_cli::GateReport;
+    use std::collections::BTreeSet;
+
+    let name = galho.context("--galho required for `gate`")?;
+    let snaps = rt.list_galhos_with_state().await;
+    let me = snaps
+        .iter()
+        .find(|g| g.name == name)
+        .ok_or_else(|| anyhow!("galho '{name}' not found"))?;
+
+    let unmet_deps: Vec<String> = me.unmet_deps().into_iter().map(str::to_string).collect();
+
+    let unready_siblings: Vec<String> = if require_siblings_ready {
+        let my_deps: BTreeSet<&String> = me.depends_on.iter().collect();
+        let mut siblings: Vec<String> = snaps
+            .iter()
+            .filter(|g| g.name != name)
+            .filter(|g| g.depends_on.iter().any(|d| my_deps.contains(d)))
+            .filter(|g| g.phase == galho_types::Phase::Declared)
+            .map(|g| g.name.clone())
+            .collect();
+        siblings.sort();
+        siblings.dedup();
+        siblings
+    } else {
+        Vec::new()
+    };
+
+    let report = GateReport {
+        galho: name.clone(),
+        phase: me.phase,
+        unmet_deps,
+        unready_siblings,
+    };
+
+    if matches!(output, OutputFormat::Json) {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!("{report}");
+    }
+
+    if report.is_blocked() {
+        bail!("deploy gate blocked for '{name}'");
     }
     Ok(())
 }

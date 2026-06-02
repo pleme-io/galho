@@ -491,6 +491,50 @@ impl std::fmt::Display for ApprovalOutcome {
     }
 }
 
+/// Deploy-order gate report for a single galho — sibling of `carve gate`
+/// (PR merge-order) at the IaC-deploy layer. `galho gate <name>` blocks a
+/// galho's deploy when an upstream dependency has not reached `Verified`/`Done`,
+/// and — under `--require-siblings-ready` — when a sibling galho (one sharing
+/// a declared dep) is still `Declared`. A `Failed` self with deps met is NOT
+/// blocked: gate sequences deploys, it does not adjudicate self-health.
+///
+/// Serializes to JSON for CI consumers; the typed `Display` is the text surface.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct GateReport {
+    pub galho: String,
+    pub phase: Phase,
+    /// Declared deps not yet `Verified`/`Done`.
+    pub unmet_deps: Vec<String>,
+    /// Siblings still `Declared` (only populated under `--require-siblings-ready`).
+    pub unready_siblings: Vec<String>,
+}
+
+impl GateReport {
+    /// The gate blocks when any upstream dep is unmet, or when any sibling is
+    /// unready (the latter only collected under `--require-siblings-ready`).
+    #[must_use]
+    pub fn is_blocked(&self) -> bool {
+        !self.unmet_deps.is_empty() || !self.unready_siblings.is_empty()
+    }
+}
+
+impl std::fmt::Display for GateReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.is_blocked() {
+            write!(f, "gate BLOCKED for {} at {}", self.galho, self.phase.as_str())?;
+            if !self.unmet_deps.is_empty() {
+                write!(f, "; unmet upstream deps: {}", self.unmet_deps.join(", "))?;
+            }
+            if !self.unready_siblings.is_empty() {
+                write!(f, "; unready siblings: {}", self.unready_siblings.join(", "))?;
+            }
+            Ok(())
+        } else {
+            write!(f, "gate OK for {} at {}", self.galho, self.phase.as_str())
+        }
+    }
+}
+
 /// One-line phase + sync summary returned by `Runtime::status`.
 #[derive(Debug, Clone)]
 pub struct StatusReport {
