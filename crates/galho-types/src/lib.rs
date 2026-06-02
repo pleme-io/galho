@@ -24,6 +24,7 @@ pub mod conflict;
 pub mod config;
 pub mod derive;
 pub mod error;
+pub mod flow_tier;
 pub mod iac_system;
 pub mod ir;
 pub mod knowledge;
@@ -49,6 +50,10 @@ pub use conflict::{
     SemanticConflictKind, StructuralConflict, StructuralConflictKind, TypedConflict,
 };
 pub use error::GalhoError;
+pub use flow_tier::{
+    Ceiling, EdgeTier, distance_to_golden_any_edge, distance_to_golden_via_golden, edge_tier,
+    golden_subgraph,
+};
 pub use iac_system::{ApplySemantics, IaCSystem, IaCSystemId, StateLocation};
 pub use ir::{
     AppliedStatus, AttrPath, DependencyEdge, DepKind, DriftKind, GraphRoot, Provenance, Resource,
