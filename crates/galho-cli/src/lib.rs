@@ -22,8 +22,8 @@ use anyhow::{anyhow, Context, Result};
 use galho_storage::backends::{LocalFsBackend, MemoryBackend};
 use galho_types::{
     morphism_for, transition_table, KnowledgeBase, LogOutcomeEmitter, MorphismContext,
-    MorphismId, OutcomeEmitter, OutcomeEvent, OutcomeEventType, Phase, PhaseClass, StackLock,
-    StackRoot, SyncConfig, SyncKind,
+    MorphismId, OutcomeEmitter, OutcomeEvent, OutcomeEventType, Phase, PhaseClass, SignalSource,
+    StackLock, StackRoot, SyncConfig, SyncKind,
 };
 use serde::Serialize;
 use time::Duration;
@@ -491,6 +491,30 @@ impl std::fmt::Display for ApprovalOutcome {
     }
 }
 
+/// Outcome of `Runtime::deliver_signal` — the typed result of an external
+/// signal (e.g. a GitHub PR-merge webhook) advancing a galho past an
+/// `ExternalSignal` sync. Reports the phase transition + the morphism fired.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SignalOutcome {
+    pub galho: String,
+    pub from_phase: Phase,
+    pub to_phase: Phase,
+    pub morphism: MorphismId,
+}
+
+impl std::fmt::Display for SignalOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "signal advanced {} {} → {} via {}",
+            self.galho,
+            self.from_phase.as_str(),
+            self.to_phase.as_str(),
+            self.morphism.as_str(),
+        )
+    }
+}
+
 /// Deploy-order gate report for a single galho — sibling of `carve gate`
 /// (PR merge-order) at the IaC-deploy layer. `galho gate <name>` blocks a
 /// galho's deploy when an upstream dependency has not reached `Verified`/`Done`,
@@ -702,6 +726,73 @@ impl Runtime {
             quorum,
             quorum_reached,
             phase: current_phase,
+        })
+    }
+
+    /// Deliver an external signal (e.g. a GitHub PR-merge webhook, a carve-gate
+    /// pass, a Jira transition) to a galho parked at an `ExternalSignal` sync.
+    ///
+    /// The galho's current phase MUST have an `ExternalSignal` sync, and the
+    /// delivered `signal` MUST match the configured source by variant
+    /// (`std::mem::discriminant` — a `GitHubPrMerge` signal satisfies a
+    /// `GitHubPrMerge`-configured sync regardless of the placeholder
+    /// repo/pr_number the fleet default seeds; operator overrides via shikumi
+    /// tiered config tighten the match at M4.5). On match, fires the available
+    /// forward morphism and returns a typed `SignalOutcome`.
+    pub async fn deliver_signal(
+        &self,
+        galho: &str,
+        signal: SignalSource,
+    ) -> Result<SignalOutcome> {
+        // Read current phase under the lock, then drop it before fire_morphism
+        // (which takes its own write lock).
+        let current_phase = {
+            let ctxs = self.contexts.read().await;
+            let ctx = ctxs
+                .get(galho)
+                .ok_or_else(|| anyhow!("galho '{galho}' not found"))?;
+            ctx.current_phase
+        };
+
+        let sync = self
+            .kb
+            .sync_for(current_phase)
+            .ok_or_else(|| anyhow!("phase {current_phase:?} has no sync config"))?;
+
+        let configured = match &sync.kind {
+            SyncKind::ExternalSignal { source } => source.clone(),
+            _ => {
+                return Err(anyhow!(
+                    "phase {current_phase:?} sync is not ExternalSignal; cannot deliver signal"
+                ));
+            }
+        };
+
+        if std::mem::discriminant(&configured) != std::mem::discriminant(&signal) {
+            return Err(anyhow!(
+                "delivered signal {signal:?} does not match configured source {configured:?} at phase {current_phase:?}"
+            ));
+        }
+
+        let forward = self.kb.forward_morphisms_from(current_phase);
+        let morphism = *forward.first().ok_or_else(|| {
+            anyhow!("no forward morphism available from phase {current_phase:?}")
+        })?;
+
+        // Emit a typed SyncConfirmed audit event for the signal delivery
+        // (builders only — no ad-hoc note string).
+        self.observe(
+            OutcomeEvent::new(OutcomeEventType::SyncConfirmed, galho)
+                .with_phase_transition(current_phase, current_phase)
+                .with_sync(sync.kind.clone()),
+        );
+
+        let to_phase = self.fire_morphism(galho, morphism, None).await?;
+        Ok(SignalOutcome {
+            galho: galho.to_string(),
+            from_phase: current_phase,
+            to_phase,
+            morphism,
         })
     }
 

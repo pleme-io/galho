@@ -163,3 +163,97 @@ fn controller_name_is_galho() {
     let controller = GalhoController::new(runtime);
     assert_eq!(controller.name(), "galho");
 }
+
+/// Drive a galho to `ApprovedAwaitingMerge` (where the sync is
+/// `ExternalSignal { GitHubPrMerge }`).
+async fn drive_to_approved(runtime: &Runtime, name: &str) {
+    runtime.new_galho(name).await.unwrap();
+    runtime.fire_morphism(name, MorphismId::Plan, None).await.unwrap();
+    runtime
+        .fire_morphism(name, MorphismId::ApplyToPreview, Some("stack-root".into()))
+        .await
+        .unwrap();
+    runtime.confirm_approval(name, "reviewer").await.unwrap();
+    runtime
+        .fire_morphism(name, MorphismId::RecordApproval, Some("reviewer".into()))
+        .await
+        .unwrap();
+    assert_eq!(
+        runtime.status(name).await.unwrap().phase.0,
+        Phase::ApprovedAwaitingMerge
+    );
+}
+
+#[test]
+fn external_signal_advances_only_via_deliver_signal_not_tick() {
+    use galho_types::SignalSource;
+    rt().block_on(async {
+        let runtime = Arc::new(Runtime::with_memory());
+        let controller = GalhoController::new(runtime.clone());
+        drive_to_approved(&runtime, "feature/sig").await;
+
+        // tick() must NOT advance — ApprovedAwaitingMerge has ExternalSignal sync.
+        let report = controller.tick().await.unwrap();
+        assert_eq!(report.objects_changed, 0, "tick must not fire ExternalSignal");
+        assert_eq!(
+            runtime.status("feature/sig").await.unwrap().phase.0,
+            Phase::ApprovedAwaitingMerge
+        );
+
+        // Delivering the matching GitHubPrMerge signal advances to Merged via Promote.
+        let outcome = controller
+            .deliver_signal(
+                "feature/sig",
+                SignalSource::GitHubPrMerge {
+                    repo: "pleme-io/galho".into(),
+                    pr_number: 42,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome.from_phase, Phase::ApprovedAwaitingMerge);
+        assert_eq!(outcome.to_phase, Phase::Merged);
+        assert_eq!(outcome.morphism, MorphismId::Promote);
+        assert_eq!(
+            runtime.status("feature/sig").await.unwrap().phase.0,
+            Phase::Merged
+        );
+    });
+}
+
+#[test]
+fn deliver_signal_rejects_wrong_phase_and_source_variant_mismatch() {
+    use galho_types::SignalSource;
+    rt().block_on(async {
+        let runtime = Arc::new(Runtime::with_memory());
+        let controller = GalhoController::new(runtime.clone());
+
+        // Declared has Automatic sync — not ExternalSignal → reject.
+        runtime.new_galho("feature/declared").await.unwrap();
+        let err = controller
+            .deliver_signal(
+                "feature/declared",
+                SignalSource::GitHubPrMerge { repo: "r".into(), pr_number: 1 },
+            )
+            .await;
+        assert!(err.is_err(), "delivering to a Declared galho must error");
+
+        // Right phase, wrong source variant → reject.
+        drive_to_approved(&runtime, "feature/mismatch").await;
+        let err = controller
+            .deliver_signal(
+                "feature/mismatch",
+                SignalSource::JiraTransition {
+                    ticket: "ABC-1".into(),
+                    target_status: "Done".into(),
+                },
+            )
+            .await;
+        assert!(err.is_err(), "source-variant mismatch must error");
+        // Phase unchanged.
+        assert_eq!(
+            runtime.status("feature/mismatch").await.unwrap().phase.0,
+            Phase::ApprovedAwaitingMerge
+        );
+    });
+}

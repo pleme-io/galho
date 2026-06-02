@@ -25,7 +25,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use engenho_controllers::{Controller, ControllerError, ReconcileReport};
 use galho_cli::Runtime;
-use galho_types::{KnowledgeBase, MorphismId, Phase, SyncKind};
+use galho_types::{KnowledgeBase, MorphismId, Phase, SignalSource, SyncKind};
 
 /// The galho controller. Wraps an `Arc<Runtime>` so multiple consumers (the controller's
 /// tick loop, a webhook handler at M4.5, an MCP server at M5+) can share state.
@@ -46,6 +46,30 @@ impl GalhoController {
     #[must_use]
     pub fn runtime(&self) -> &Arc<Runtime> {
         &self.runtime
+    }
+
+    /// Webhook ingress: deliver an external signal (GitHub PR-merge, carve-gate
+    /// pass, Jira transition) to a galho parked at an `ExternalSignal` sync.
+    /// Thin pass-through to the shared `Runtime::deliver_signal` so CLI-driven
+    /// and controller-driven signal handling go through identical typed logic.
+    pub async fn deliver_signal(
+        &self,
+        galho: &str,
+        signal: SignalSource,
+    ) -> Result<galho_cli::SignalOutcome, ControllerError> {
+        let outcome = self
+            .runtime
+            .deliver_signal(galho, signal)
+            .await
+            .map_err(internal_error)?;
+        tracing::info!(
+            galho = %outcome.galho,
+            from = %outcome.from_phase,
+            to = %outcome.to_phase,
+            morphism = %outcome.morphism,
+            "controller delivered external signal"
+        );
+        Ok(outcome)
     }
 }
 
