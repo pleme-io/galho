@@ -53,7 +53,7 @@ pub use ir::{
 };
 pub use merge::{MergeResult, StateMergeResult, merge_states, three_way_merge};
 pub use plan::{Plan, ReplacementReason, TypedChange, ValueDiff};
-pub use state::{AdapterState, Passaporte, StateMeta, TypedState};
+pub use state::{AdapterState, Passaporte, StateMeta, TypedState, TypedStateDecodeError};
 pub use value::{CrossSystemContract, CrossSystemRef, SecretRef, Value};
 
 // ===== §IV-bis: Phase / Morphism / Sync / StackLock / KnowledgeBase =====

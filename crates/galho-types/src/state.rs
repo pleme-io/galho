@@ -14,7 +14,15 @@ use crate::ir::ResourceGraph;
 
 /// A typed, content-addressable state instance. Generic over the `IaCSystem` so
 /// `TypedState<Terraform>` and `TypedState<Crossplane>` are distinct types at compile time.
+///
+/// Deserialization routes through [`TypedStateRepr`] and asserts that the
+/// decoded `meta.iac_system` matches `S::id()` — closing the type-confusion
+/// hole where bytes written for one IaC system could be decoded into the wrong
+/// `TypedState<S>` (the `PhantomData<S>` carries no runtime tag of its own).
+/// Serialization is unchanged, so on-disk bytes + content hashes are stable.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(bound(deserialize = ""))]
+#[serde(try_from = "TypedStateRepr")]
 pub struct TypedState<S: IaCSystem> {
     pub graph: ResourceGraph,
     #[serde(default)]
@@ -22,6 +30,44 @@ pub struct TypedState<S: IaCSystem> {
     pub meta: StateMeta,
     #[serde(skip, default)]
     _marker: PhantomData<S>,
+}
+
+/// Untagged wire shape for [`TypedState`] decoding. Carries no `S` marker; the
+/// `TryFrom` impl re-attaches the marker after asserting the system matches.
+#[derive(Deserialize)]
+struct TypedStateRepr {
+    graph: ResourceGraph,
+    #[serde(default)]
+    adapter_state: AdapterState,
+    meta: StateMeta,
+}
+
+impl<S: IaCSystem> TryFrom<TypedStateRepr> for TypedState<S> {
+    type Error = TypedStateDecodeError;
+
+    fn try_from(repr: TypedStateRepr) -> Result<Self, Self::Error> {
+        let expected = S::id();
+        if repr.meta.iac_system != expected.as_str() {
+            return Err(TypedStateDecodeError::SystemMismatch {
+                expected: expected.as_str().to_string(),
+                found: repr.meta.iac_system,
+            });
+        }
+        Ok(Self {
+            graph: repr.graph,
+            adapter_state: repr.adapter_state,
+            meta: repr.meta,
+            _marker: PhantomData,
+        })
+    }
+}
+
+/// Error decoding a [`TypedState`] from bytes written for a different IaC system.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum TypedStateDecodeError {
+    /// The decoded `meta.iac_system` does not match `S::id()` — wrong-system bytes.
+    #[error("TypedState system mismatch: expected '{expected}', found '{found}'")]
+    SystemMismatch { expected: String, found: String },
 }
 
 impl<S: IaCSystem> TypedState<S> {
