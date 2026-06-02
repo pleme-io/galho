@@ -1,6 +1,6 @@
 # galho
 
-skip-format-ban: migration in progress — see `crates/galho-cli/tests/format_ban_guard.rs` for the typed migration ratchet (count cannot grow). 47 remaining call sites as of 2026-05-22 after extracting `TextMarker` + `SyncSummary` typed Display newtypes; ratchet test fails if any new code grows the count. Remove waiver + add workspace `clippy.toml` (`disallowed_macros = ["std::format"]`) when CEILING reaches 0.
+skip-format-ban: migration in progress — see `crates/galho-cli/tests/format_ban_guard.rs` for the typed migration ratchet (count cannot grow). 41 remaining call sites as of 2026-06-02 (CEILING pinned in `format_ban_guard.rs`) after extracting `TextMarker` + `SyncSummary` typed Display newtypes; ratchet test fails if any new code grows the count. Remove waiver + add workspace `clippy.toml` (`disallowed_macros = ["std::format"]`) when CEILING reaches 0.
 
 Branch-aware typed IaC state (caixa Biblioteca kind).
 
@@ -49,7 +49,7 @@ cargo test  --workspace            # tests pass across all crates
 - substrate's `rust-workspace-release-flake.nix` for the flake (`nix run .#galho` → `galho-cli`).
 - caixa-native: `caixa.lisp` declares Biblioteca kind.
 - Consumes tameshi via path dep during in-tree development; release workflow swaps to git dep before publish.
-- Property-based testing via `proptest`. 36 passing tests covering the load-bearing canonicalization and merge invariants.
+- Property-based testing via `proptest`. 243 passing tests across the workspace covering canonicalization, three-way merge, the phase FSM, the sealed-type invariants, and the storage CAS/lineage algebra.
 
 ## What this library deliberately doesn't do
 
@@ -73,4 +73,16 @@ Two deferred extractions with named triggers in the spec:
 
 ## Status
 
-v0.1 — M1: galho-types + galho-storage complete with proptest coverage. 36 passing tests. M2 (galho-terraform via magma) is next.
+v0.1 — all 5 crates real (galho-types / -storage / -cli / -controller / -terraform). 243 tests green; format ratchet 41/41.
+
+**FIXABLE-backlog landed 2026-06-02** (local commits `602a243`..`aac811e`; closes the unrepresentability-model FIXABLE rows from `theory/ECLUSA.md` §XVIII.4 / `theory/UNREPRESENTABILITY.md` toward golden-capable flows):
+- `galho gate` deploy-order subcommand (sibling of `carve gate`).
+- `Runtime::deliver_signal` — typed `ExternalSignal` (discriminant-matched) ingress + controller pass-through (closes the M4.5 webhook gap).
+- `MorphismRequirement::MissingTransitionRow` — hard error replacing the silent `unwrap_or_else(m.to_phase())` fallback.
+- `AppliedStatus` smart-ctor — all-zeros Applied hash made unrepresentable.
+- Sealed `StackLock` (private fields + `try_from_parts` + hand-written `Deserialize`) + `Refined<Duration, ApplyTtlBounds>` bounded TTL.
+- `TypedState<S>` serde `try_from` re-tag asserts `meta.iac_system == S::id()` (closes cross-system type-confusion).
+- `advance_ref` lineage check + `AdvanceOutcome`/`Divergence` + `Addressed` witness + `cas_delete_ref` (both backends).
+- Sealed `MorphismContext.current_phase` behind `KnowledgeBase::advance` (closes the precondition bypass) + additive `Galho<P>` phantom-typestate facade (forward arc; illegal transition = compile error).
+
+**Not yet pushed** — galho has no GitHub remote; commits are local-only. **Next:** create `pleme-io/galho` + push; then the CEILING controllers (drift / quota lease / reap `ReapJob`), galho-terraform via magma (M2/M3), and the `Galho<P>` backward+failure arc (9b v2).
