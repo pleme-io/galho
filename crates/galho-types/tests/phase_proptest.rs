@@ -210,9 +210,15 @@ fn verified_requires_attestation_gated_sync() {
 // StackLock invariants
 // =============================================================================
 
+/// Build a `BoundedApplyTtl` from a `Duration`, panicking if out of bounds —
+/// the lock ctor now takes the refined TTL, not a raw `Duration`.
+fn ttl(d: Duration) -> galho_types::BoundedApplyTtl {
+    galho_types::BoundedApplyTtl::try_new(d).expect("test TTL within ApplyTtlBounds")
+}
+
 #[test]
 fn stack_lock_acquire_and_join_increments_holders() {
-    let mut lock = StackLock::acquire(StackRoot::new("abc"), "feature/a", Duration::days(7));
+    let mut lock = StackLock::acquire(StackRoot::new("abc"), "feature/a", ttl(Duration::days(7)));
     assert_eq!(lock.holder_count(), 1);
     assert!(lock.join("feature/b"));
     assert_eq!(lock.holder_count(), 2);
@@ -223,7 +229,7 @@ fn stack_lock_acquire_and_join_increments_holders() {
 
 #[test]
 fn stack_lock_release_holder_returns_empty_signal() {
-    let mut lock = StackLock::acquire(StackRoot::new("abc"), "feature/a", Duration::days(7));
+    let mut lock = StackLock::acquire(StackRoot::new("abc"), "feature/a", ttl(Duration::days(7)));
     lock.join("feature/b");
     assert!(!lock.release_holder("feature/a"));
     assert_eq!(lock.holder_count(), 1);
@@ -233,7 +239,8 @@ fn stack_lock_release_holder_returns_empty_signal() {
 
 #[test]
 fn stack_lock_expires_when_now_past_expiry() {
-    let lock = StackLock::acquire(StackRoot::new("abc"), "feature/a", Duration::seconds(1));
+    // 1 minute is the floor of ApplyTtlBounds (1s would now be rejected).
+    let lock = StackLock::acquire(StackRoot::new("abc"), "feature/a", ttl(Duration::minutes(1)));
     let future = time::OffsetDateTime::now_utc() + Duration::days(1);
     assert!(lock.is_expired(future));
 }

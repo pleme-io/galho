@@ -21,9 +21,9 @@ use std::sync::Arc;
 use anyhow::{anyhow, Context, Result};
 use galho_storage::backends::{LocalFsBackend, MemoryBackend};
 use galho_types::{
-    morphism_for, transition_table, KnowledgeBase, LogOutcomeEmitter, MorphismContext,
-    MorphismId, OutcomeEmitter, OutcomeEvent, OutcomeEventType, Phase, PhaseClass, SignalSource,
-    StackLock, StackRoot, SyncConfig, SyncKind,
+    morphism_for, transition_table, BoundedApplyTtl, KnowledgeBase, LogOutcomeEmitter,
+    MorphismContext, MorphismId, OutcomeEmitter, OutcomeEvent, OutcomeEventType, Phase, PhaseClass,
+    SignalSource, StackLock, StackRoot, SyncConfig, SyncKind,
 };
 use serde::Serialize;
 use time::Duration;
@@ -1032,7 +1032,8 @@ impl Runtime {
                 let lock = StackLock::acquire(
                     StackRoot::new(stack_root),
                     name,
-                    Duration::days(7),
+                    BoundedApplyTtl::try_new(Duration::days(7))
+                        .expect("7d is within ApplyTtlBounds"),
                 );
                 locks.insert(stack_root.to_string(), lock);
                 OutcomeEventType::StackLockAcquired
@@ -1196,7 +1197,7 @@ impl Runtime {
                 let lock: galho_types::StackLock = serde_json::from_slice(&bytes)
                     .with_context(|| format!("decode lock for root '{root_sanitized}'"))?;
                 // The lock carries its own stack_root field — use that as the in-memory key.
-                locks.insert(lock.stack_root.as_str().to_string(), lock);
+                locks.insert(lock.stack_root().as_str().to_string(), lock);
             }
         }
 

@@ -75,7 +75,10 @@ pub use outcome::{
     EmitError, LogOutcomeEmitter, MemoryOutcomeEmitter, NoopOutcomeEmitter, OutcomeEmitter,
     OutcomeEvent, OutcomeEventType,
 };
-pub use stack_lock::{LockError, LockOutcome, StackLock, StackRoot};
+pub use stack_lock::{
+    ApplyTtlBounds, BoundedApplyTtl, Bounds, LockError, LockOutcome, Refined, RefinedError,
+    StackLock, StackLockError, StackRoot,
+};
 pub use sync::{
     AttestationProof, ComplianceRegime, SignalSource, Sync, SyncConfig, SyncKind, SyncReceipt,
     TimeoutAction,
