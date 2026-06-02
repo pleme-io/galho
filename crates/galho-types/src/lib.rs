@@ -17,6 +17,7 @@
 #![warn(clippy::all, clippy::pedantic)]
 #![allow(clippy::module_name_repetitions, clippy::missing_errors_doc)]
 
+pub mod attractor;
 pub mod canonical;
 pub mod comfort;
 pub mod compliance;
@@ -42,6 +43,7 @@ pub mod value;
 #[cfg(feature = "testing")]
 pub mod testing;
 
+pub use attractor::{AttractorMove, Goal, distance_to, recommend};
 pub use canonical::{CanonicalBytes, CanonicalSink, content_hash};
 pub use comfort::{COMFORT_MATRIX, ComfortRow, ComfortTier, ParkCost, comfort_of};
 pub use derive::{apply_changes, apply_plan, diff_attrs, diff_graphs, diff_states};
