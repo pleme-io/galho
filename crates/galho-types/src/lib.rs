@@ -23,6 +23,7 @@ pub mod comfort;
 pub mod compliance;
 pub mod conflict;
 pub mod config;
+pub mod cred;
 pub mod derive;
 pub mod error;
 pub mod flow_tier;
@@ -46,6 +47,7 @@ pub mod testing;
 pub use attractor::{AttractorMove, Goal, distance_to, recommend};
 pub use canonical::{CanonicalBytes, CanonicalSink, content_hash};
 pub use comfort::{COMFORT_MATRIX, ComfortRow, ComfortTier, ParkCost, comfort_of};
+pub use cred::{CeilingCrossing, CredScope, CrossingRefused, RequiredScope, required_scope};
 pub use derive::{apply_changes, apply_plan, diff_attrs, diff_graphs, diff_states};
 pub use conflict::{
     BranchSide, CrossSystemConflict, CrossSystemMismatch, SemanticConflict,
